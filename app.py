@@ -5,21 +5,18 @@ from functools import wraps
 import bcrypt
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-
 app = Flask(__name__)
-CORS(app)
-
+from flask_cors import CORS, cross_origin
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False, expose_headers=["Content-Disposition"])
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "usuarios.db")
 DOCS_DIR = os.path.join(BASE_DIR, "documentos")
 os.makedirs(DOCS_DIR, exist_ok=True)
-
 # ---- Base de datos ----
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 def init_db():
     conn = get_db()
     conn.execute("""
@@ -94,7 +91,6 @@ def login():
     data = request.get_json()
     ruc = data.get("ruc", "").strip()
     contrasena = data.get("contrasena", "")
-
     conn = get_db()
     usuario = conn.execute("SELECT * FROM usuarios WHERE ruc=?", (ruc,)).fetchone()
     if not usuario:
@@ -110,7 +106,6 @@ def login():
         "correo": usuario["correo"],
         "es_admin": bool(usuario["es_admin"])
     })
-
 # ---- Admin: crear usuario ----
 @app.route("/api/admin/usuarios", methods=["POST"])
 @requiere_admin
@@ -120,9 +115,7 @@ def crear_usuario():
     correo = data.get("correo", "").strip()
     nombre = data.get("nombre", "").strip()
     contrasena = data.get("contrasena", "")
-
     if not ruc or not correo or not nombre or not contrasena:
-
         return jsonify({"error": "Todos los campos son obligatorios"}), 400
     hashed = bcrypt.hashpw(contrasena.encode(), bcrypt.gensalt())
     conn = get_db()
@@ -135,7 +128,6 @@ def crear_usuario():
         return jsonify({"mensaje": "Usuario creado", "id": usuario_id}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "El RUC o correo ya existe"}), 400
-
 # ---- Admin: listar usuarios ----
 @app.route("/api/admin/usuarios", methods=["GET"])
 @requiere_admin
@@ -143,7 +135,6 @@ def listar_usuarios():
     conn = get_db()
     usuarios = conn.execute("SELECT id, ruc, correo, nombre, es_admin, activo, creado_en FROM usuarios").fetchall()
     return jsonify([dict(u) for u in usuarios])
-
 # ---- Admin: deshabilitar / habilitar ----
 @app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
 @requiere_admin
