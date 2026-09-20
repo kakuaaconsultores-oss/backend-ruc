@@ -530,7 +530,6 @@ def descargar_documento(doc_id):
     conn.close()
     if not d:
         return jsonify({"error": "No autorizado"}), 403
-    return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]], as_attachment=True)
-
+    return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]), as_attachment=True)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
