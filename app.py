@@ -47,9 +47,15 @@ def init_db():
             intentos_fallidos INTEGER DEFAULT 0,
             bloqueo_hasta TEXT DEFAULT NULL,
             token_sesion TEXT DEFAULT NULL,
+            debe_cambiar INTEGER DEFAULT 0,
             creado_en TEXT DEFAULT (datetime('now'))
         )
     """)
+    # Agrega la columna debe_cambiar si la base ya existía sin ella
+    try:
+        conn.execute("ALTER TABLE usuarios ADD COLUMN debe_cambiar INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Ya existe la columna
     conn.execute("""
         CREATE TABLE IF NOT EXISTS documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +115,18 @@ def check_password(pw, hashed):
 def generar_token():
     return secrets.token_urlsafe(32)
 
+def validar_politica_password(pw):
+    """Valida la política de seguridad de contraseñas."""
+    if len(pw) < 6:
+        return "La contraseña debe tener al menos 6 caracteres"
+    if not any(c.isupper() for c in pw):
+        return "Debe contener al menos una letra mayúscula"
+    if not any(c.isdigit() for c in pw):
+        return "Debe contener al menos un número"
+    if not any(not c.isalnum() for c in pw):
+        return "Debe contener al menos un carácter especial (!@#$%&*)"
+    return None
+
 def enviar_correo(destinatario, asunto, cuerpo_html):
     if not SMTP_USER or not SMTP_PASS:
         print(f"[SMTP] No configurado. No se envió correo a {destinatario}")
@@ -120,7 +138,6 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         msg["To"] = destinatario
         msg.attach(MIMEText(cuerpo_html, "html"))
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
-
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [destinatario], msg.as_string())
@@ -192,7 +209,13 @@ def login():
         conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = ? WHERE id = ?", (token, u["id"]))
         conn.commit()
         conn.close()
-        return jsonify({"ok": True, "token": token, "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"]}})
+        # Devuelve debe_cambiar para que el frontend redirija si es necesario
+        return jsonify({
+            "ok": True,
+            "token": token,
+            "debe_cambiar": bool(u["debe_cambiar"]),
+            "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"]}
+        })
     else:
         intentos = u["intentos_fallidos"] + 1
         if intentos >= MAX_INTENTOS:
@@ -206,6 +229,25 @@ def login():
             conn.commit()
             conn.close()
             return jsonify({"error": "Usuario o contraseña incorrectos", "intentos_restantes": MAX_INTENTOS - intentos}), 401
+
+# Cambiar contraseña (obligatorio en primer ingreso o tras reset admin)
+@app.route("/api/cambiar-password", methods=["POST"])
+@usuario_required
+def cambiar_password():
+    u = obtener_usuario_por_token()
+    data = request.get_json() or {}
+    nueva_password = data.get("nueva_password", "")
+
+    error = validar_politica_password(nueva_password)
+    if error:
+        return jsonify({"error": error}), 400
+
+    nuevo_hash = hash_password(nueva_password)
+    conn = get_db()
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL WHERE id = ?", (nuevo_hash, u["id"]))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
 
 # Logout (invalida el token)
 @app.route("/api/logout", methods=["POST"])
@@ -251,7 +293,7 @@ def listar_tickets():
     conn.close()
     return jsonify([dict(t) for t in tickets])
 
-# Admin: aprobar ticket (cambia contraseña, invalida token viejo y envía correo)
+# Admin: aprobar ticket (cambia contraseña, fuerza cambio, invalida token viejo y envía correo)
 @app.route("/api/admin/tickets/<int:ticket_id>/aprobar", methods=["POST"])
 @admin_required
 def aprobar_ticket(ticket_id):
@@ -268,7 +310,7 @@ def aprobar_ticket(ticket_id):
         conn.close()
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL WHERE id = ?", (hashed, t["usuario_id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
     conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = ?, resuelto_en = datetime('now') WHERE id = ?", (nueva_password, ticket_id))
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
@@ -279,7 +321,7 @@ def aprobar_ticket(ticket_id):
         <p>Hola <strong>{u['nombre']}</strong>,</p>
         <p>Tu contraseña fue restablecida por el administrador.</p>
         <p><strong>Tu nueva contraseña es:</strong> <code>{nueva_password}</code></p>
-        <p>Te recomendamos cambiarla apenas ingreses.</p>
+        <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
         <p>Saludos,<br>Equipo Kakuaa Consultores</p>
         """
         enviar_correo(u["correo"], "Tu contraseña fue restablecida", cuerpo)
@@ -311,7 +353,7 @@ def listar_usuarios():
     conn.close()
     return jsonify([dict(u) for u in usuarios])
 
-# Admin: crear usuario
+# Admin: crear usuario (marca debe_cambiar para forzar cambio en primer ingreso)
 @app.route("/api/admin/usuarios", methods=["POST"])
 @admin_required
 def crear_usuario():
@@ -325,7 +367,7 @@ def crear_usuario():
     conn = get_db()
     try:
         hashed = hash_password(contrasena)
-        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash) VALUES (?, ?, ?, ?)",
+        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, debe_cambiar) VALUES (?, ?, ?, ?, 1)",
                            (ruc, correo, nombre, hashed))
         conn.commit()
         return jsonify({"ok": True, "id": cur.lastrowid}), 201
@@ -333,7 +375,7 @@ def crear_usuario():
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
-# Admin: editar usuario (invalida token si cambia contraseña no, pero sí si cambia RUC o desactiva)
+# Admin: editar usuario (invalida token si cambia RUC o desactiva)
 @app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
 @admin_required
 def editar_usuario(usuario_id):
@@ -358,7 +400,7 @@ def editar_usuario(usuario_id):
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
-# Admin: resetear contraseña manual (invalida token viejo)
+# Admin: resetear contraseña manual (fuerza cambio, invalida token viejo)
 @app.route("/api/admin/usuarios/<int:usuario_id>/reset-password", methods=["POST"])
 @admin_required
 def resetear_password(usuario_id):
@@ -375,7 +417,7 @@ def resetear_password(usuario_id):
         conn.close()
         return jsonify({"error": "No podés resetear la contraseña del administrador principal"}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL WHERE id = ?", (hashed, usuario_id))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
     conn.commit()
     conn.close()
     if u["correo"]:
@@ -384,6 +426,7 @@ def resetear_password(usuario_id):
         <p>Hola <strong>{u['nombre']}</strong>,</p>
         <p>Tu contraseña fue restablecida por el administrador.</p>
         <p><strong>Tu nueva contraseña es:</strong> <code>{nueva_password}</code></p>
+        <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
         <p>Saludos,<br>Equipo Kakuaa Consultores</p>
         """
         enviar_correo(u["correo"], "Tu contraseña fue restablecida", cuerpo)
@@ -531,5 +574,6 @@ def descargar_documento(doc_id):
     if not d:
         return jsonify({"error": "No autorizado"}), 403
     return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]), as_attachment=True)
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
