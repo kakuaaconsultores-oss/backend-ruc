@@ -284,7 +284,7 @@ def eliminar_documento(doc_id):
     doc = conn.execute("SELECT * FROM documentos WHERE id=?", (doc_id,)).fetchone()
     if not doc:
         return jsonify({"error": "Documento no encontrado"}), 404
-    ruta = os.path.join(DOCS_DIR, str(doc["usuario_id"], doc["carpeta"], doc["subcarpeta"], doc["nombre_archivo"])
+    ruta = os.path.join(DOCS_DIR, str(doc["usuario_id"]), doc["carpeta"], doc["subcarpeta"], doc["nombre_archivo"])
     if os.path.exists(ruta):
         os.remove(ruta)
     conn.execute("DELETE FROM documentos WHERE id=?", (doc_id,))
@@ -313,7 +313,7 @@ def descargar_documento(doc_id):
     doc = conn.execute("SELECT * FROM documentos WHERE id=? AND usuario_id=?", (doc_id, usuario["id"])).fetchone()
     if not doc:
         return jsonify({"error": "Documento no encontrado"}), 404
-    carpeta = os.path.join(DOCS_DIR, str(usuario["id"], doc["carpeta"], doc["subcarpeta"])
+    carpeta = os.path.join(DOCS_DIR, str(usuario["id"]), doc["carpeta"], doc["subcarpeta"])
     return send_from_directory(carpeta, doc["nombre_archivo"], as_attachment=True)
 
 # ============ CONSULTA RUC ============
