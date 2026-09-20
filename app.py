@@ -97,7 +97,13 @@ def login():
         return jsonify({"error": "RUC o contraseña incorrectos"}), 401
     if not usuario["activo"]:
         return jsonify({"error": "Usuario deshabilitado. Contacte al administrador"}), 403
-    if not bcrypt.checkpw(contrasena.encode(), usuario["contrasena"].encode()):
+    try:
+        contrasena_hash = usuario["contrasena"]
+        if isinstance(contrasena_hash, str):
+            contrasena_hash = contrasena_hash.encode()
+        if not bcrypt.checkpw(contrasena.encode(), contrasena_hash):
+            return jsonify({"error": "RUC o contraseña incorrectos"}), 401
+    except Exception:
         return jsonify({"error": "RUC o contraseña incorrectos"}), 401
     return jsonify({
         "id": usuario["id"],
