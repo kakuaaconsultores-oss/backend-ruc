@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 import smtplib
+import secrets
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -45,6 +46,7 @@ def init_db():
             activo INTEGER DEFAULT 1,
             intentos_fallidos INTEGER DEFAULT 0,
             bloqueo_hasta TEXT DEFAULT NULL,
+            token_sesion TEXT DEFAULT NULL,
             creado_en TEXT DEFAULT (datetime('now'))
         )
     """)
@@ -104,8 +106,10 @@ def check_password(pw, hashed):
     except Exception:
         return False
 
+def generar_token():
+    return secrets.token_urlsafe(32)
+
 def enviar_correo(destinatario, asunto, cuerpo_html):
-    """Envía correo vía SMTP. Si no hay credenciales configuradas, no falla: solo registra."""
     if not SMTP_USER or not SMTP_PASS:
         print(f"[SMTP] No configurado. No se envió correo a {destinatario}")
         return False
@@ -116,6 +120,7 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         msg["To"] = destinatario
         msg.attach(MIMEText(cuerpo_html, "html"))
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [destinatario], msg.as_string())
@@ -125,12 +130,24 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         print(f"[SMTP] Error al enviar: {e}")
         return False
 
+def obtener_usuario_por_token():
+    """Obtiene el usuario autenticado desde el header Authorization (token de sesión)."""
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "").strip()
+    if not token:
+        return None
+    conn = get_db()
+    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion = ?", (token,)).fetchone()
+    conn.close()
+    if not u or not u["activo"]:
+        return None
+    return u
+
 def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        ruc = auth.replace("Bearer ", "").strip()
-        if ruc != "80000000-0":
+        u = obtener_usuario_por_token()
+        if not u or u["ruc"] != "80000000-0":
             return jsonify({"error": "No autorizado"}), 401
         return f(*args, **kwargs)
     return wrapper
@@ -138,14 +155,8 @@ def admin_required(f):
 def usuario_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        ruc = auth.replace("Bearer ", "").strip()
-        if not ruc:
-            return jsonify({"error": "No autorizado"}), 401
-        conn = get_db()
-        u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
-        conn.close()
-        if not u or not u["activo"]:
+        u = obtener_usuario_por_token()
+        if not u:
             return jsonify({"error": "No autorizado"}), 401
         return f(*args, **kwargs)
     return wrapper
@@ -156,7 +167,7 @@ def usuario_required(f):
 def healthz():
     return jsonify({"status": "ok"})
 
-# Login con límite de intentos
+# Login con límite de intentos y token de sesión
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
@@ -168,7 +179,6 @@ def login():
         return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
     if not u["activo"]:
         return jsonify({"error": "Usuario deshabilitado"}), 403
-    # Verificar bloqueo
     if u["bloqueo_hasta"]:
         bloqueo = datetime.fromisoformat(u["bloqueo_hasta"])
         if datetime.utcnow() < bloqueo:
@@ -178,10 +188,11 @@ def login():
             conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (u["id"],))
             conn.commit()
     if check_password(password, u["password_hash"]):
-        conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (u["id"],))
+        token = generar_token()
+        conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = ? WHERE id = ?", (token, u["id"]))
         conn.commit()
         conn.close()
-        return jsonify({"ok": True, "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"]}})
+        return jsonify({"ok": True, "token": token, "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"]}})
     else:
         intentos = u["intentos_fallidos"] + 1
         if intentos >= MAX_INTENTOS:
@@ -196,6 +207,17 @@ def login():
             conn.close()
             return jsonify({"error": "Usuario o contraseña incorrectos", "intentos_restantes": MAX_INTENTOS - intentos}), 401
 
+# Logout (invalida el token)
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    u = obtener_usuario_por_token()
+    if u:
+        conn = get_db()
+        conn.execute("UPDATE usuarios SET token_sesion = NULL WHERE id = ?", (u["id"],))
+        conn.commit()
+        conn.close()
+    return jsonify({"ok": True})
+
 # Solicitar reset (crea ticket)
 @app.route("/api/solicitar-reset", methods=["POST"])
 def solicitar_reset():
@@ -207,7 +229,6 @@ def solicitar_reset():
     u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
     if not u:
         return jsonify({"error": "El RUC no existe en el sistema"}), 404
-    # Evitar tickets duplicados pendientes
     pendiente = conn.execute("SELECT * FROM tickets_recuperacion WHERE usuario_id = ? AND estado = 'pendiente'", (u["id"],)).fetchone()
     if pendiente:
         conn.close()
@@ -230,7 +251,7 @@ def listar_tickets():
     conn.close()
     return jsonify([dict(t) for t in tickets])
 
-# Admin: aprobar ticket (cambia contraseña y envía correo)
+# Admin: aprobar ticket (cambia contraseña, invalida token viejo y envía correo)
 @app.route("/api/admin/tickets/<int:ticket_id>/aprobar", methods=["POST"])
 @admin_required
 def aprobar_ticket(ticket_id):
@@ -246,14 +267,12 @@ def aprobar_ticket(ticket_id):
     if t["estado"] != "pendiente":
         conn.close()
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
-    # Cambiar contraseña
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hashed, t["usuario_id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL WHERE id = ?", (hashed, t["usuario_id"]))
     conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = ?, resuelto_en = datetime('now') WHERE id = ?", (nueva_password, ticket_id))
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
     conn.close()
-    # Enviar correo
     if u and u["correo"]:
         cuerpo = f"""
         <h2>Kakuaa Consultores</h2>
@@ -314,7 +333,7 @@ def crear_usuario():
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
-# Admin: editar usuario
+# Admin: editar usuario (invalida token si cambia contraseña no, pero sí si cambia RUC o desactiva)
 @app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
 @admin_required
 def editar_usuario(usuario_id):
@@ -327,7 +346,6 @@ def editar_usuario(usuario_id):
     if not u:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    # Proteger al admin principal
     if u["ruc"] == "80000000-0":
         conn.close()
         return jsonify({"error": "No podés editar al administrador principal"}), 403
@@ -340,7 +358,7 @@ def editar_usuario(usuario_id):
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
-# Admin: resetear contraseña manual
+# Admin: resetear contraseña manual (invalida token viejo)
 @app.route("/api/admin/usuarios/<int:usuario_id>/reset-password", methods=["POST"])
 @admin_required
 def resetear_password(usuario_id):
@@ -357,7 +375,7 @@ def resetear_password(usuario_id):
         conn.close()
         return jsonify({"error": "No podés resetear la contraseña del administrador principal"}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hashed, usuario_id))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL WHERE id = ?", (hashed, usuario_id))
     conn.commit()
     conn.close()
     if u["correo"]:
@@ -371,7 +389,7 @@ def resetear_password(usuario_id):
         enviar_correo(u["correo"], "Tu contraseña fue restablecida", cuerpo)
     return jsonify({"ok": True, "message": "Contraseña actualizada y correo enviado"})
 
-# Admin: cambiar estado (habilitar/deshabilitar)
+# Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
 @app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
 @admin_required
 def cambiar_estado(usuario_id):
@@ -385,7 +403,10 @@ def cambiar_estado(usuario_id):
     if u["ruc"] == "80000000-0":
         conn.close()
         return jsonify({"error": "No podés deshabilitar al administrador principal"}), 403
-    conn.execute("UPDATE usuarios SET activo = ? WHERE id = ?", (1 if activo else 0, usuario_id))
+    if not activo:
+        conn.execute("UPDATE usuarios SET activo = 0, token_sesion = NULL WHERE id = ?", (usuario_id,))
+    else:
+        conn.execute("UPDATE usuarios SET activo = 1 WHERE id = ?", (usuario_id,))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -451,7 +472,7 @@ def admin_subcarpetas(usuario_id):
     conn.close()
     return jsonify([dict(s) for s in subs])
 
-# Admin: crear subcarpeta (con soporte de nivel 2)
+# Admin: crear subcarpeta
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["POST"])
 @admin_required
 def admin_crear_subcarpeta(usuario_id):
@@ -482,7 +503,6 @@ def admin_eliminar_subcarpeta(usuario_id, nombre):
     if not s:
         conn.close()
         return jsonify({"error": "Subcarpeta no encontrada"}), 404
-    # Eliminar subcarpetas hijas y sus documentos
     conn.execute("DELETE FROM subcarpetas WHERE usuario_id = ? AND padre = ?", (usuario_id, nombre))
     conn.execute("DELETE FROM documentos WHERE usuario_id = ? AND subcarpeta = ?", (usuario_id, nombre))
     conn.execute("DELETE FROM subcarpetas WHERE id = ?", (s["id"],))
@@ -494,10 +514,8 @@ def admin_eliminar_subcarpeta(usuario_id, nombre):
 @app.route("/api/mis-documentos", methods=["GET"])
 @usuario_required
 def mis_documentos():
-    auth = request.headers.get("Authorization", "")
-    ruc = auth.replace("Bearer ", "").strip()
+    u = obtener_usuario_por_token()
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
     docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ?", (u["id"],)).fetchall()
     conn.close()
     return jsonify([dict(d) for d in docs])
@@ -506,15 +524,13 @@ def mis_documentos():
 @app.route("/api/mis-documentos/<int:doc_id>/descargar", methods=["GET"])
 @usuario_required
 def descargar_documento(doc_id):
-    auth = request.headers.get("Authorization", "")
-    ruc = auth.replace("Bearer ", "").strip()
+    u = obtener_usuario_por_token()
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
     d = conn.execute("SELECT * FROM documentos WHERE id = ? AND usuario_id = ?", (doc_id, u["id"])).fetchone()
     conn.close()
     if not d:
         return jsonify({"error": "No autorizado"}), 403
-    return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]), as_attachment=True)
+    return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]], as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
