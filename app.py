@@ -117,7 +117,8 @@ def init_db():
     if superadmin:
         conn.execute("UPDATE usuarios SET rol = 'contribuyente' WHERE rol = 'superadmin' AND id != ?", (superadmin["id"],))
     elif legacy:
-        conn.execute("UPDATE usuarios SET rol = 'superadmin', usuario = COALESCE(NULLIF(usuario,''), 'superadmin') WHERE id = ?", (legacy["id"],))
+        superadmin_usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+        conn.execute("UPDATE usuarios SET rol = 'superadmin', usuario = ? WHERE id = ?", (superadmin_usuario, legacy["id"]))
     else:
         usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
         correo = os.environ.get("SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com").strip() or "kakuaaconsultores@gmail.com"
@@ -540,11 +541,11 @@ def resetear_password(usuario_id):
     if not u:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u["ruc"] == "80000000-0":
+    if u["rol"] == "superadmin":
         conn.close()
         return jsonify({"error": "No podés resetear la contraseña del administrador principal"}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
     conn.commit()
     conn.close()
     if u["correo"]:
