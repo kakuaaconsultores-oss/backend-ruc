@@ -23,6 +23,7 @@ BLOQUEO_MINUTOS = 30
 OTP_MINUTOS = 1
 MAX_REGENERACIONES_OTP = 5
 SESION_HORAS = 8
+RESET_TOKEN_HORAS = 1
 MAX_UPLOAD_MB = 16
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
 MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -41,6 +42,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
+RESET_URL_BASE = os.environ.get("RESET_URL_BASE", "https://kakuaaconsultores-oss.github.io/restablecer-password.html")
 
 # ---------- Base de datos ----------
 def get_db():
@@ -72,7 +74,9 @@ def init_db():
         ("usuario", "TEXT"),
         ("debe_cambiar", "INTEGER DEFAULT 0"),
         ("token_expira_en", "TEXT DEFAULT NULL"),
-        ("token_sesion_hash", "TEXT DEFAULT NULL")
+        ("token_sesion_hash", "TEXT DEFAULT NULL"),
+        ("reset_token_hash", "TEXT DEFAULT NULL"),
+        ("reset_expira_en", "TEXT DEFAULT NULL")
     ]:
         try:
             conn.execute(f"ALTER TABLE usuarios ADD COLUMN {col} {definition}")
@@ -464,15 +468,10 @@ def listar_tickets():
     conn.close()
     return jsonify([dict(t) for t in tickets])
 
-# Admin: aprobar ticket (cambia contraseña, fuerza cambio, invalida token viejo y envía correo)
+# Admin: aprobar ticket y enviar enlace de restablecimiento de un solo uso
 @app.route("/api/admin/tickets/<int:ticket_id>/aprobar", methods=["POST"])
 @admin_required
 def aprobar_ticket(ticket_id):
-    data = request.get_json() or {}
-    nueva_password = data.get("nueva_password", "")
-    error_password = validar_politica_password(nueva_password)
-    if error_password:
-        return jsonify({"error": error_password}), 400
     conn = get_db()
     t = conn.execute("SELECT * FROM tickets_recuperacion WHERE id = ?", (ticket_id,)).fetchone()
     if not t:
@@ -489,23 +488,85 @@ def aprobar_ticket(ticket_id):
     if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
         conn.close()
         return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
-    hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
-    conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = NULL, resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
+    token = generar_token()
+    token_hash = hash_token(token)
+    expira = datetime.utcnow() + timedelta(hours=RESET_TOKEN_HORAS)
+    conn.execute(
+        "UPDATE usuarios SET reset_token_hash = ?, reset_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?",
+        (token_hash, expira.isoformat(), t["usuario_id"])
+    )
+    conn.execute(
+        "UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = NULL, resuelto_en = datetime('now') WHERE id = ?",
+        (ticket_id,)
+    )
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
     conn.close()
-    if u and u["correo"]:
+    if not u or not u["correo"]:
+        return jsonify({"error": "El usuario no tiene un correo de recuperación configurado."}), 400
+    enlace = f"{RESET_URL_BASE}?token={token}"
+    cuerpo = f"""
+    <h2>Kakuaa Consultores</h2>
+    <p>Hola <strong>{html.escape(str(u["nombre"]))}</strong>,</p>
+    <p>Tu solicitud de recuperación fue aprobada.</p>
+    <p>El siguiente enlace te permitirá establecer una nueva contraseña. Es de un solo uso y vence en {RESET_TOKEN_HORAS} hora.</p>
+    <p><a href="{html.escape(enlace, quote=True)}">Restablecer mi contraseña</a></p>
+    <p>Si no solicitaste este cambio, podés ignorar este correo.</p>
+    <p>Saludos,<br>Equipo Kakuaa Consultores</p>
+    """
+    if not enviar_correo(u["correo"], "Restablecer contraseña - Kakuaa Consultores", cuerpo):
+        return jsonify({"ok": True, "message": "Solicitud aprobada, pero no se pudo enviar el correo. Revisá la configuración SMTP."})
+    return jsonify({"ok": True, "message": "Solicitud aprobada y enlace de recuperación enviado."})
+
+# Restablecer contraseña mediante token de un solo uso
+@app.route("/api/restablecer-password", methods=["POST"])
+def restablecer_password():
+    data = request.get_json() or {}
+    token = data.get("token", "").strip()
+    nueva_password = data.get("nueva_password", "")
+    confirmar_password = data.get("confirmar_password", "")
+    if not token:
+        return jsonify({"error": "Enlace de recuperación inválido."}), 400
+    if nueva_password != confirmar_password:
+        return jsonify({"error": "Las contraseñas no coinciden."}), 400
+    error_password = validar_politica_password(nueva_password)
+    if error_password:
+        return jsonify({"error": error_password}), 400
+    conn = get_db()
+    u = conn.execute(
+        "SELECT * FROM usuarios WHERE reset_token_hash = ? AND reset_expira_en IS NOT NULL",
+        (hash_token(token),)
+    ).fetchone()
+    if not u:
+        conn.close()
+        return jsonify({"error": "El enlace de recuperación no es válido o ya fue utilizado."}), 400
+    try:
+        if datetime.utcnow() >= datetime.fromisoformat(u["reset_expira_en"]):
+            conn.execute("UPDATE usuarios SET reset_token_hash = NULL, reset_expira_en = NULL WHERE id = ?", (u["id"],))
+            conn.commit()
+            conn.close()
+            return jsonify({"error": "El enlace de recuperación venció. Solicitá una nueva recuperación."}), 400
+    except ValueError:
+        conn.execute("UPDATE usuarios SET reset_token_hash = NULL, reset_expira_en = NULL WHERE id = ?", (u["id"],))
+        conn.commit()
+        conn.close()
+        return jsonify({"error": "El enlace de recuperación no es válido."}), 400
+    hashed = hash_password(nueva_password)
+    conn.execute(
+        "UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL, reset_token_hash = NULL, reset_expira_en = NULL WHERE id = ?",
+        (hashed, u["id"])
+    )
+    conn.commit()
+    conn.close()
+    if u["correo"]:
         cuerpo = f"""
         <h2>Kakuaa Consultores</h2>
         <p>Hola <strong>{html.escape(str(u["nombre"]))}</strong>,</p>
-        <p>Tu contraseña fue restablecida por el administrador.</p>
-        <p><strong>Tu nueva contraseña es:</strong> <code>{html.escape(nueva_password)}</code></p>
-        <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
-        <p>Saludos,<br>Equipo Kakuaa Consultores</p>
+        <p>Tu contraseña fue restablecida correctamente.</p>
+        <p>Si no realizaste este cambio, contactá al administrador de Kakuaa Consultores.</p>
         """
-        enviar_correo(u["correo"], "Tu contraseña fue restablecida", cuerpo)
-    return jsonify({"ok": True, "message": "Contraseña actualizada y correo enviado"})
+        enviar_correo(u["correo"], "Contraseña restablecida - Kakuaa Consultores", cuerpo)
+    return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Ya podés iniciar sesión."})
 
 # Admin: rechazar ticket
 @app.route("/api/admin/tickets/<int:ticket_id>/rechazar", methods=["POST"])
