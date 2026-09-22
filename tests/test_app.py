@@ -11,6 +11,7 @@ os.environ["SUPERADMIN_USUARIO"] = "superadmin-test"
 os.environ["SUPERADMIN_PASSWORD"] = "Super123!"
 os.environ["SUPERADMIN_EMAIL"] = "superadmin@test.local"
 os.environ["COOKIE_SECURE"] = "0"
+os.environ["SESSION_COOKIE_NAME"] = "kakuaa_test_session"
 
 from app import app, get_db, hash_password
 
@@ -129,7 +130,7 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(good.status_code, 200)
         token = good.get_json()["csrf_token"]
         self.assertTrue(token)
-        self.assertIsNotNone(self.client.get_cookie("__Host-kakuaa_session"))
+        self.assertIsNotNone(self.client.get_cookie("kakuaa_test_session"))
         self.assertEqual(
             self.client.get("/api/mis-documentos", headers=self.auth(token)).status_code,
             200,
