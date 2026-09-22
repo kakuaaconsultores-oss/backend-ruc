@@ -45,11 +45,21 @@ class KakuaaApiTests(unittest.TestCase):
                         reset_token_hash=NULL, reset_expira_en=NULL, debe_cambiar=0, activo=1
                         WHERE rol='superadmin'""", (hash_password("Super123!"),))
         conn.execute("UPDATE superadmin_bootstrap SET usado=0, usado_en=NULL WHERE id=1")
+        superadmin = conn.execute("SELECT id FROM usuarios WHERE rol='superadmin' LIMIT 1").fetchone()
+        if not superadmin:
+            cur = conn.execute(
+                """INSERT INTO usuarios
+                   (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar)
+                   VALUES (?, ?, ?, ?, ?, 'superadmin', 0)""",
+                ("SUPERADMIN-000000", "superadmin@test.local", "SUPERADMIN",
+                 hash_password("Super123!"), "superadmin-test"),
+            )
+            superadmin_id = cur.lastrowid
+        else:
+            superadmin_id = superadmin["id"]
         conn.commit()
         self.__class__.last_email = ()
-        self.superadmin_id = conn.execute(
-            "SELECT id FROM usuarios WHERE rol='superadmin'"
-        ).fetchone()["id"]
+        self.superadmin_id = superadmin_id
         conn.close()
 
     def add_user(self, usuario, rol="contribuyente", password="Test123!", ruc=None):
@@ -93,6 +103,12 @@ class KakuaaApiTests(unittest.TestCase):
         return {"X-CSRF-Token": token}
 
     def test_legacy_admin_is_not_promoted_to_superadmin_and_bootstrap_creates_separate_account(self):
+        conn = get_db()
+        conn.execute("DELETE FROM usuarios WHERE rol='superadmin'")
+        conn.execute("UPDATE superadmin_bootstrap SET usado=0, usado_en=NULL WHERE id=1")
+        conn.commit()
+        conn.close()
+
         admin_id = self.add_user("admin-legacy", "admin", ruc="80000000-0")
         conn = get_db()
         row = conn.execute("SELECT rol, usuario FROM usuarios WHERE id=?", (admin_id,)).fetchone()
