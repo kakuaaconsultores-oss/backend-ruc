@@ -1333,18 +1333,41 @@ def crear_factura_cliente():
     concepto = str(data.get("concepto", "")).strip()
     fecha = str(data.get("fecha", "")).strip() or datetime.utcnow().strftime("%Y-%m-%d")
     estado = str(data.get("estado", "emitida")).strip().lower()
-    if not numero or not concepto or monto < 0 or estado not in ESTADOS_FACTURA:
+    articulo_raw = data.get("articulo_id")
+    cantidad_raw = data.get("cantidad", 1)
+    articulo_id = None
+    try:
+        cantidad = float(cantidad_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Cantidad inválida."}), 400
+    if articulo_raw not in (None, "", 0, "0"):
+        try: articulo_id = int(articulo_raw)
+        except (TypeError, ValueError): return jsonify({"error": "Artículo inválido."}), 400
+    if not numero or not concepto or monto < 0 or cantidad <= 0 or estado not in ESTADOS_FACTURA:
         return jsonify({"error": "Datos de facturación inválidos."}), 400
     conn = get_db()
+    if articulo_id is not None:
+        articulo = conn.execute("SELECT * FROM articulos WHERE id = ? AND activo = 1", (articulo_id,)).fetchone()
+        if not articulo:
+            conn.close(); return jsonify({"error": "Artículo no encontrado o inactivo."}), 404
+        tarifa = _tarifa_vigente(conn, articulo_id, fecha)
+        if not tarifa:
+            conn.close(); return jsonify({"error": "El artículo no tiene una tarifa vigente para esa fecha. Debés actualizar la tarifa antes de facturar."}), 409
+        monto_esperado = round(float(tarifa["precio"]) * cantidad, 2)
+        if abs(monto - monto_esperado) > 0.01:
+            conn.close(); return jsonify({"error": "El monto no coincide con la tarifa vigente.", "monto_esperado": monto_esperado, "tarifa_id": tarifa["id"]}), 409
+        tarifa_id = tarifa["id"]
+    else:
+        tarifa_id = None
     if not _cliente_valido(conn, cliente_id):
         conn.close()
         return jsonify({"error": "Cliente no encontrado."}), 404
     try:
         cur = conn.execute("""
             INSERT INTO facturas_clientes
-            (cliente_id, numero, fecha, concepto, monto, estado, creado_por)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"]))
+            (cliente_id, numero, fecha, concepto, monto, estado, creado_por, articulo_id, tarifa_id, cantidad)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"], articulo_id, tarifa_id, cantidad))
         conn.commit()
         factura_id = cur.lastrowid
     except sqlite3.IntegrityError:
