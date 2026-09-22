@@ -699,10 +699,20 @@ def login():
         conn.execute("UPDATE usuarios SET intentos_fallidos = ? WHERE id = ?", (intentos, u["id"])); conn.commit(); conn.close()
         restantes = MAX_INTENTOS - intentos
         return jsonify({"error": f"Usuario o contraseña incorrectos. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
-    challenge, otp, _ = crear_desafio_otp(conn, u, 1)
-    enviado = enviar_otp(u, otp); conn.close()
-    if not enviado: return jsonify({"error": "No se pudo enviar el código de acceso. Intentá nuevamente."}), 503
-    return jsonify({"ok": True, "requiere_otp": True, "challenge": challenge, "usuario": {"id": u["id"], "usuario": u["usuario"], "nombre": u["nombre"], "correo": u["correo"], "rol": u["rol"]}})
+    # El código de seguridad se muestra en la misma pantalla de login.
+    # Se genera en el servidor y se almacena únicamente como hash.
+    challenge, codigo, _ = crear_desafio_otp(conn, u, 1)
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "requiere_otp": True,
+        "challenge": challenge,
+        "codigo": codigo,
+        "usuario": {
+            "id": u["id"], "usuario": u["usuario"], "nombre": u["nombre"],
+            "correo": u["correo"], "rol": u["rol"]
+        }
+    })
 
 @app.route("/api/login/verify-otp", methods=["POST"])
 def verificar_otp():
@@ -753,13 +763,16 @@ def reenviar_otp():
     if generaciones >= MAX_REGENERACIONES_OTP + 1:
         conn.close()
         return jsonify({"error": "Alcanzaste el máximo de 5 solicitudes de nuevo código. Volvé a iniciar sesión."}), 429
-    new_challenge, otp, total_generaciones = crear_desafio_otp(conn, row, generaciones + 1)
-    enviado = enviar_otp(row, otp)
+    new_challenge, codigo, total_generaciones = crear_desafio_otp(conn, row, generaciones + 1)
     conn.close()
-    if not enviado:
-        return jsonify({"error": "No se pudo enviar el nuevo código."}), 503
     restantes = max(0, MAX_REGENERACIONES_OTP - (total_generaciones - 1))
-    return jsonify({"ok": True, "challenge": new_challenge, "regeneraciones_restantes": restantes, "message": "Se envió un nuevo código. El anterior quedó invalidado."})
+    return jsonify({
+        "ok": True,
+        "challenge": new_challenge,
+        "codigo": codigo,
+        "regeneraciones_restantes": restantes,
+        "message": "Se generó un nuevo código. El anterior quedó invalidado."
+    })
 # Cambiar contraseña (obligatorio en primer ingreso o tras reset admin)
 @app.route("/api/cambiar-password", methods=["POST"])
 @usuario_required
