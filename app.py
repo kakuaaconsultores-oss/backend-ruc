@@ -1208,7 +1208,7 @@ def actualizar_tarea(tarea_id):
             cambios.append("iniciado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
         if estado == "completada":
             cambios.append("completado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
-            _detener_sesion_activa(conn, tarea_id)
+            _detener_tarea_si_corresponde(conn, tarea_id)
     if "asignado_id" in data:
         asignado_id = data["asignado_id"]
         if asignado_id in (None, "", 0, "0"):
