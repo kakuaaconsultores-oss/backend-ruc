@@ -163,9 +163,26 @@ def init_db():
     conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
     # El ADMIN histórico 80000000-0 se conserva como ADMIN. La cuenta
     # SUPERADMIN es independiente y solo se crea mediante bootstrap.
-    superadmin = conn.execute("SELECT id FROM usuarios WHERE rol = 'superadmin' LIMIT 1").fetchone()
+    superadmin = conn.execute("SELECT id, usuario FROM usuarios WHERE rol = 'superadmin' LIMIT 1").fetchone()
     if superadmin:
         conn.execute("UPDATE usuarios SET rol = 'contribuyente' WHERE rol = 'superadmin' AND id != ?", (superadmin["id"],))
+        # El bootstrap inicial se ejecutó con un placeholder accidental. Si la
+        # cuenta aún conserva ese placeholder, normalizamos el usuario a un
+        # identificador limpio y estable para producción.
+        usuario_configurado = os.environ.get("SUPERADMIN_USUARIO", "").strip()
+        placeholders = {"el usuario que quieras conservar/crear", "superadmin"}
+        if not usuario_configurado or usuario_configurado.lower() in placeholders:
+            usuario_configurado = "superadmin"
+        if superadmin["usuario"] in placeholders or not str(superadmin["usuario"] or "").strip():
+            conflicto = conn.execute(
+                "SELECT id FROM usuarios WHERE usuario = ? AND id != ?",
+                (usuario_configurado, superadmin["id"]),
+            ).fetchone()
+            if not conflicto:
+                conn.execute(
+                    "UPDATE usuarios SET usuario = ? WHERE id = ?",
+                    (usuario_configurado, superadmin["id"]),
+                )
 
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_superadmin ON usuarios(rol) WHERE rol = 'superadmin'")
     conn.commit()
