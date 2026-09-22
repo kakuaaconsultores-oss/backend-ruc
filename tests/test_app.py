@@ -394,13 +394,25 @@ class KakuaaApiTests(unittest.TestCase):
         docs_real = os.path.realpath(os.environ["DOCS_DIR"])
         self.assertEqual(os.path.commonpath([docs_real, os.path.realpath(doc["ruta"])]), docs_real)
 
-        user_a_token = self.verify(self.login("usera"))
-        user_b_token = self.verify(self.login("userb"))
+        user_a_client = app.test_client()
+        user_b_client = app.test_client()
+        challenge = user_a_client.post(
+            "/api/login", json={"usuario": "usera", "password": "Test123!"}
+        ).get_json()["challenge"]
+        user_a_token = user_a_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+        challenge = user_b_client.post(
+            "/api/login", json={"usuario": "userb", "password": "Test123!"}
+        ).get_json()["challenge"]
+        user_b_token = user_b_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
         self.assertEqual(
-            self.client.get("/api/mis-documentos", headers=self.auth(user_a_token)).status_code,
+            user_a_client.get("/api/mis-documentos", headers=self.auth(user_a_token)).status_code,
             200,
         )
-        forbidden = self.client.get(
+        forbidden = user_b_client.get(
             f"/api/mis-documentos/{doc['id']}/descargar",
             headers=self.auth(user_b_token),
         )
@@ -499,17 +511,32 @@ class KakuaaApiTests(unittest.TestCase):
     def test_disabling_user_revokes_existing_session(self):
         self.add_user("target-disable")
         self.add_user("admin-disable", "admin")
-        target_token = self.verify(self.login("target-disable"))
-        admin_token = self.verify(self.login("admin-disable"))
+        target_client = app.test_client()
+        admin_client = app.test_client()
+
+        challenge = target_client.post(
+            "/api/login", json={"usuario": "target-disable", "password": "Test123!"}
+        ).get_json()["challenge"]
+        target_token = target_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+
+        challenge = admin_client.post(
+            "/api/login", json={"usuario": "admin-disable", "password": "Test123!"}
+        ).get_json()["challenge"]
+        admin_token = admin_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+
         target_id = self._user_id("target-disable")
 
-        response = self.client.put(
+        response = admin_client.put(
             f"/api/admin/usuarios/{target_id}/estado",
             headers=self.auth(admin_token),
             json={"activo": False},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
+        self.assertEqual(target_client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
 
         conn = get_db()
         row = conn.execute("SELECT activo, token_sesion, token_sesion_hash, token_expira_en FROM usuarios WHERE usuario=?", ("target-disable",)).fetchone()
@@ -519,13 +546,13 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertIsNone(row["token_sesion_hash"])
         self.assertIsNone(row["token_expira_en"])
 
-        response = self.client.put(
+        response = admin_client.put(
             f"/api/admin/usuarios/{target_id}/estado",
             headers=self.auth(admin_token),
             json={"activo": True},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
+        self.assertEqual(target_client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
 
     def test_superadmin_cannot_be_disabled(self):
         self.add_user("admin3", "admin")
@@ -611,7 +638,15 @@ class KakuaaApiTests(unittest.TestCase):
     def test_recovery_approval_sends_single_use_reset_link(self):
         self.add_user("recover-approved")
         self.add_user("recovery-admin", "admin")
-        old_token = self.verify(self.login("recover-approved"))
+        recovery_client = app.test_client()
+        admin_client = app.test_client()
+
+        challenge = recovery_client.post(
+            "/api/login", json={"usuario": "recover-approved", "password": "Test123!"}
+        ).get_json()["challenge"]
+        old_token = recovery_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
 
         request_reset = self.client.post("/api/solicitar-reset", json={"ruc": "recover-approved-ruc"})
         self.assertEqual(request_reset.status_code, 200)
@@ -623,15 +658,20 @@ class KakuaaApiTests(unittest.TestCase):
         ).fetchone()
         conn.close()
 
-        admin_token = self.verify(self.login("recovery-admin"))
-        response = self.client.post(
+        challenge = admin_client.post(
+            "/api/login", json={"usuario": "recovery-admin", "password": "Test123!"}
+        ).get_json()["challenge"]
+        admin_token = admin_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+        response = admin_client.post(
             f"/api/admin/tickets/{ticket['id']}/aprobar",
             headers=self.auth(admin_token),
         )
         self.assertEqual(response.status_code, 200)
 
         self.assertEqual(
-            self.client.get("/api/mis-documentos", headers=self.auth(old_token)).status_code,
+            recovery_client.get("/api/mis-documentos", headers=self.auth(old_token)).status_code,
             401,
         )
 
