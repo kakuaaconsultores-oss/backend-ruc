@@ -320,7 +320,7 @@ def verificar_otp():
     challenge = data.get("challenge", "").strip(); otp = data.get("otp", "").strip()
     if not challenge or len(otp) != 4 or not otp.isdigit(): return jsonify({"error": "Ingresá el código de 4 dígitos."}), 400
     conn = get_db()
-    row = conn.execute("SELECT o.*, u.activo, u.nombre, u.usuario, u.correo, u.ruc, u.rol FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
+    row = conn.execute("SELECT o.*, u.activo, u.nombre, u.usuario, u.correo, u.ruc, u.rol, u.debe_cambiar FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
     if not row: conn.close(); return jsonify({"error": "El código ya no es válido. Solicitá uno nuevo."}), 401
     if datetime.utcnow() >= datetime.fromisoformat(row["expira_en"]):
         conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],)); conn.commit(); conn.close(); return jsonify({"error": "El código venció. Solicitá uno nuevo.", "vencido": True}), 401
@@ -443,6 +443,14 @@ def aprobar_ticket(ticket_id):
     if t["estado"] != "pendiente":
         conn.close()
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario asociado no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
     hashed = hash_password(nueva_password)
     conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
     conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = NULL, resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
@@ -473,6 +481,14 @@ def rechazar_ticket(ticket_id):
     if t["estado"] != "pendiente":
         conn.close()
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario asociado no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
     conn.execute("UPDATE tickets_recuperacion SET estado = 'rechazado', resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
     conn.commit()
     conn.close()
@@ -500,6 +516,9 @@ def crear_usuario():
     rol_nuevo = data.get("rol", "contribuyente").strip()
     if not ruc or not correo or not nombre or not contrasena or not usuario_nuevo:
         return jsonify({"error": "Faltan datos"}), 400
+    error_password = validar_politica_password(contrasena)
+    if error_password:
+        return jsonify({"error": error_password}), 400
     if rol_nuevo not in ("admin", "operativo", "contribuyente"):
         return jsonify({"error": "Rol inválido o no permitido"}), 400
     u_actual = obtener_usuario_por_token()
@@ -529,9 +548,13 @@ def editar_usuario(usuario_id):
     if not u:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u["rol"] == "superadmin":
+    u_actual = obtener_usuario_por_token()
+    if u["rol"] == "superadmin" or not puede_gestionar(u_actual["rol"], u["rol"]):
         conn.close()
-        return jsonify({"error": "No podés editar al administrador principal"}), 403
+        return jsonify({"error": "No tenés permisos para editar este usuario."}), 403
+    if not ruc or not correo or not nombre:
+        conn.close()
+        return jsonify({"error": "RUC, correo y nombre son obligatorios."}), 400
     try:
         conn.execute("UPDATE usuarios SET ruc = ?, correo = ?, nombre = ? WHERE id = ?", (ruc, correo, nombre, usuario_id))
         conn.commit()
@@ -554,9 +577,10 @@ def resetear_password(usuario_id):
     if not u:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u["rol"] == "superadmin":
+    u_actual = obtener_usuario_por_token()
+    if u["rol"] == "superadmin" or not puede_gestionar(u_actual["rol"], u["rol"]):
         conn.close()
-        return jsonify({"error": "No podés resetear la contraseña del administrador principal"}), 403
+        return jsonify({"error": "No tenés permisos para resetear este usuario."}), 403
     hashed = hash_password(nueva_password)
     conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
     conn.commit()
