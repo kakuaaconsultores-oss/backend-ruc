@@ -581,7 +581,7 @@ def aprobar_ticket(ticket_id):
     token_hash = hash_token(token)
     expira = datetime.utcnow() + timedelta(hours=RESET_TOKEN_HORAS)
     conn.execute(
-        "UPDATE usuarios SET reset_token_hash = ?, reset_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?",
+        "UPDATE usuarios SET reset_token_hash = ?, reset_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?",
         (token_hash, expira.isoformat(), t["usuario_id"])
     )
     conn.execute(
@@ -784,7 +784,7 @@ def resetear_password(usuario_id):
         conn.close()
         return jsonify({"error": "No tenés permisos para resetear este usuario."}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
     conn.commit()
     conn.close()
     if u["correo"]:
@@ -821,9 +821,10 @@ def cambiar_estado(usuario_id):
         "UPDATE usuarios SET activo = ?, "
         "token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, "
         "token_sesion_hash = CASE WHEN ? = 0 THEN NULL ELSE token_sesion_hash END, "
+        "csrf_token_hash = CASE WHEN ? = 0 THEN NULL ELSE csrf_token_hash END, "
         "token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END "
         "WHERE id = ?",
-        (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id),
+        (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id),
     )
     conn.commit()
     conn.close()
