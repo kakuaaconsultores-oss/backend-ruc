@@ -130,7 +130,13 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(good.status_code, 200)
         token = good.get_json()["csrf_token"]
         self.assertTrue(token)
+        self.assertNotIn("token", good.get_json())
         self.assertIsNotNone(self.client.get_cookie("kakuaa_test_session"))
+        legacy_client = app.test_client()
+        self.assertEqual(
+            legacy_client.get("/api/mis-documentos", headers={"Authorization": "Bearer legacy-token"}).status_code,
+            401,
+        )
         self.assertEqual(
             self.client.get("/api/mis-documentos", headers=self.auth(token)).status_code,
             200,
