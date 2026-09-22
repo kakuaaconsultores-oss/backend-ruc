@@ -432,7 +432,7 @@ def aprobar_ticket(ticket_id):
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
     hashed = hash_password(nueva_password)
     conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
-    conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = ?, resuelto_en = datetime('now') WHERE id = ?", (nueva_password, ticket_id))
+    conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = NULL, resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
     conn.close()
