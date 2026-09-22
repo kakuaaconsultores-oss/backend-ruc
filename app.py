@@ -249,6 +249,55 @@ def init_db():
         FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
     )""")
 
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS facturas_clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        numero TEXT NOT NULL,
+        fecha TEXT NOT NULL DEFAULT (date('now')),
+        concepto TEXT NOT NULL,
+        monto REAL NOT NULL DEFAULT 0,
+        estado TEXT NOT NULL DEFAULT 'emitida',
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_facturas_cliente ON facturas_clientes(cliente_id, fecha)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tareas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        titulo TEXT NOT NULL,
+        descripcion TEXT DEFAULT '',
+        prioridad TEXT NOT NULL DEFAULT 'media',
+        estado TEXT NOT NULL DEFAULT 'pendiente',
+        asignado_id INTEGER,
+        creado_por INTEGER NOT NULL,
+        fecha_limite TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        iniciado_en TEXT DEFAULT NULL,
+        completado_en TEXT DEFAULT NULL,
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (asignado_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_cliente ON tareas(cliente_id, estado)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_asignado ON tareas(asignado_id, estado)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sesiones_trabajo (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tarea_id INTEGER NOT NULL,
+        cliente_id INTEGER NOT NULL,
+        usuario_id INTEGER NOT NULL,
+        inicio TEXT NOT NULL,
+        fin TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (tarea_id) REFERENCES tareas(id),
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_cliente ON sesiones_trabajo(cliente_id, inicio)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_usuario_activa ON sesiones_trabajo(usuario_id, fin)")
+
     conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
     # El ADMIN histórico 80000000-0 se conserva como ADMIN. La cuenta
     # SUPERADMIN es independiente y solo se crea mediante bootstrap.
@@ -905,3 +954,386 @@ def rechazar_ticket(ticket_id):
         return jsonify({"error": "Ticket no encontrado"}), 404
     if t["estado"] != "pendiente":
         conn.close()
+
+# ---------- SUPERADMIN: dashboard, facturación, tareas y tracking ----------
+PRIORIDADES_TAREA = {"urgente": 1, "alta": 2, "media": 3, "baja": 4}
+ESTADOS_TAREA = {"pendiente", "en_progreso", "bloqueada", "completada", "cancelada"}
+ESTADOS_FACTURA = {"emitida", "cobrada", "anulada"}
+
+def _cliente_valido(conn, cliente_id):
+    return conn.execute(
+        "SELECT * FROM usuarios WHERE id = ? AND rol = 'contribuyente'",
+        (cliente_id,),
+    ).fetchone()
+
+def _usuario_trabajo_valido(conn, usuario_id):
+    return conn.execute(
+        "SELECT * FROM usuarios WHERE id = ? AND rol IN ('admin','operativo') AND activo = 1",
+        (usuario_id,),
+    ).fetchone()
+
+def _cerrar_sesion_activa(conn, usuario_id, fin=None):
+    fin = fin or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE sesiones_trabajo SET fin = ? WHERE usuario_id = ? AND fin IS NULL",
+        (fin, usuario_id),
+    )
+
+def _detener_tarea_si_corresponde(conn, tarea_id, usuario_id=None):
+    query = "SELECT * FROM sesiones_trabajo WHERE tarea_id = ? AND fin IS NULL"
+    params = [tarea_id]
+    if usuario_id is not None:
+        query += " AND usuario_id = ?"
+        params.append(usuario_id)
+    sesiones = conn.execute(query, tuple(params)).fetchall()
+    ahora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    for sesion in sesiones:
+        conn.execute("UPDATE sesiones_trabajo SET fin = ? WHERE id = ?", (ahora, sesion["id"]))
+
+@app.route("/api/admin/dashboard", methods=["GET"])
+@admin_required
+def admin_dashboard():
+    conn = get_db()
+    clientes = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN activo = 1 THEN 1 ELSE 0 END),0) AS activos
+        FROM usuarios WHERE rol = 'contribuyente'
+    """).fetchone()
+    facturacion = conn.execute("""
+        SELECT COALESCE(SUM(monto),0) AS total
+        FROM facturas_clientes
+        WHERE estado <> 'anulada'
+    """).fetchone()
+    tickets = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END),0) AS pendientes,
+               COALESCE(SUM(CASE WHEN estado IN ('aprobado','rechazado') THEN 1 ELSE 0 END),0) AS resueltos
+        FROM tickets_recuperacion
+    """).fetchone()
+    tareas = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END),0) AS pendientes,
+               COALESCE(SUM(CASE WHEN estado = 'en_progreso' THEN 1 ELSE 0 END),0) AS en_progreso,
+               COALESCE(SUM(CASE WHEN estado = 'completada' THEN 1 ELSE 0 END),0) AS completadas,
+               COALESCE(SUM(CASE WHEN estado = 'bloqueada' THEN 1 ELSE 0 END),0) AS bloqueadas
+        FROM tareas
+    """).fetchone()
+    horas = conn.execute("""
+        SELECT COALESCE(SUM((julianday(COALESCE(fin, datetime('now'))) - julianday(inicio)) * 24.0),0) AS horas
+        FROM sesiones_trabajo
+    """).fetchone()
+    por_cliente = conn.execute("""
+        SELECT u.id, u.nombre, u.ruc,
+               COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas,
+               COALESCE((SELECT SUM(f.monto) FROM facturas_clientes f
+                         WHERE f.cliente_id = u.id AND f.estado <> 'anulada'),0) AS facturacion,
+               COALESCE((SELECT COUNT(*) FROM tareas t WHERE t.cliente_id = u.id),0) AS tareas
+        FROM usuarios u
+        LEFT JOIN sesiones_trabajo s ON s.cliente_id = u.id
+        WHERE u.rol = 'contribuyente'
+        GROUP BY u.id, u.nombre, u.ruc
+        ORDER BY horas DESC, u.nombre COLLATE NOCASE
+    """).fetchall()
+    ultimas_tareas = conn.execute("""
+        SELECT t.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc,
+               a.nombre AS asignado_nombre
+        FROM tareas t
+        JOIN usuarios c ON c.id = t.cliente_id
+        LEFT JOIN usuarios a ON a.id = t.asignado_id
+        ORDER BY CASE t.prioridad
+            WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+            CASE t.estado WHEN 'completada' THEN 3 WHEN 'cancelada' THEN 4 ELSE 1 END,
+            t.creado_en DESC
+        LIMIT 12
+    """).fetchall()
+    conn.close()
+    return jsonify({
+        "clientes": dict(clientes),
+        "facturacion_total": round(float(facturacion["total"] or 0), 2),
+        "horas_totales": round(float(horas["horas"] or 0), 2),
+        "tickets": dict(tickets),
+        "tareas": dict(tareas),
+        "por_cliente": [dict(r) for r in por_cliente],
+        "ultimas_tareas": [dict(r) for r in ultimas_tareas],
+    })
+
+@app.route("/api/admin/clientes", methods=["GET"])
+@staff_required
+def listar_clientes_operativos():
+    conn = get_db()
+    clientes = conn.execute("""
+        SELECT id, ruc, correo, nombre, activo, creado_en
+        FROM usuarios WHERE rol = 'contribuyente'
+        ORDER BY activo DESC, nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(c) for c in clientes])
+
+@app.route("/api/admin/facturacion", methods=["GET"])
+@admin_required
+def listar_facturacion():
+    conn = get_db()
+    facturas = conn.execute("""
+        SELECT f.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc
+        FROM facturas_clientes f
+        JOIN usuarios c ON c.id = f.cliente_id
+        ORDER BY f.fecha DESC, f.id DESC
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in facturas])
+
+@app.route("/api/admin/facturacion", methods=["POST"])
+@admin_required
+def crear_factura_cliente():
+    data = request.get_json() or {}
+    try:
+        cliente_id = int(data.get("cliente_id"))
+        monto = float(data.get("monto"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Cliente y monto son obligatorios."}), 400
+    numero = str(data.get("numero", "")).strip()
+    concepto = str(data.get("concepto", "")).strip()
+    fecha = str(data.get("fecha", "")).strip() or datetime.utcnow().strftime("%Y-%m-%d")
+    estado = str(data.get("estado", "emitida")).strip().lower()
+    if not numero or not concepto or monto < 0 or estado not in ESTADOS_FACTURA:
+        return jsonify({"error": "Datos de facturación inválidos."}), 400
+    conn = get_db()
+    if not _cliente_valido(conn, cliente_id):
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado."}), 404
+    try:
+        cur = conn.execute("""
+            INSERT INTO facturas_clientes
+            (cliente_id, numero, fecha, concepto, monto, estado, creado_por)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"]))
+        conn.commit()
+        factura_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "No se pudo registrar la factura."}), 409
+    conn.close()
+    return jsonify({"ok": True, "id": factura_id})
+
+@app.route("/api/admin/tareas", methods=["GET"])
+@staff_required
+def listar_tareas():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    sql = """
+        SELECT t.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc,
+               a.nombre AS asignado_nombre, a.rol AS asignado_rol
+        FROM tareas t
+        JOIN usuarios c ON c.id = t.cliente_id
+        LEFT JOIN usuarios a ON a.id = t.asignado_id
+    """
+    params = []
+    if u["rol"] == "operativo":
+        sql += " WHERE t.asignado_id = ?"
+        params.append(u["id"])
+    sql += """ ORDER BY CASE t.estado WHEN 'completada' THEN 4 WHEN 'cancelada' THEN 5 ELSE 1 END,
+               CASE t.prioridad WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+               t.fecha_limite IS NULL, t.fecha_limite, t.creado_en DESC"""
+    tareas = conn.execute(sql, tuple(params)).fetchall()
+    conn.close()
+    return jsonify([dict(t) for t in tareas])
+
+@app.route("/api/admin/tareas", methods=["POST"])
+@admin_required
+def crear_tarea():
+    data = request.get_json() or {}
+    try:
+        cliente_id = int(data.get("cliente_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Seleccioná un cliente."}), 400
+    titulo = str(data.get("titulo", "")).strip()
+    descripcion = str(data.get("descripcion", "")).strip()
+    prioridad = str(data.get("prioridad", "media")).strip().lower()
+    fecha_limite = str(data.get("fecha_limite", "")).strip() or None
+    asignado_raw = data.get("asignado_id")
+    asignado_id = None
+    if asignado_raw not in (None, "", 0, "0"):
+        try:
+            asignado_id = int(asignado_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Responsable inválido."}), 400
+    if not titulo or prioridad not in PRIORIDADES_TAREA:
+        return jsonify({"error": "Título y prioridad son obligatorios."}), 400
+    conn = get_db()
+    actual = obtener_usuario_por_token()
+    if not _cliente_valido(conn, cliente_id):
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado."}), 404
+    if asignado_id is not None:
+        asignado = _usuario_trabajo_valido(conn, asignado_id)
+        if not asignado or not puede_gestionar(actual["rol"], asignado["rol"]):
+            conn.close()
+            return jsonify({"error": "No tenés permisos para designar esa tarea."}), 403
+    cur = conn.execute("""
+        INSERT INTO tareas
+        (cliente_id, titulo, descripcion, prioridad, asignado_id, creado_por, fecha_limite)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (cliente_id, titulo, descripcion, prioridad, asignado_id, actual["id"], fecha_limite))
+    conn.commit()
+    tarea_id = cur.lastrowid
+    conn.close()
+    return jsonify({"ok": True, "id": tarea_id})
+
+@app.route("/api/admin/tareas/<int:tarea_id>", methods=["PATCH"])
+@admin_required
+def actualizar_tarea(tarea_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    actual = obtener_usuario_por_token()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close()
+        return jsonify({"error": "Tarea no encontrada."}), 404
+    cambios = []
+    valores = []
+    if "prioridad" in data:
+        prioridad = str(data["prioridad"]).strip().lower()
+        if prioridad not in PRIORIDADES_TAREA:
+            conn.close()
+            return jsonify({"error": "Prioridad inválida."}), 400
+        cambios.append("prioridad = ?"); valores.append(prioridad)
+    if "estado" in data:
+        estado = str(data["estado"]).strip().lower()
+        if estado not in ESTADOS_TAREA:
+            conn.close()
+            return jsonify({"error": "Estado inválido."}), 400
+        cambios.append("estado = ?"); valores.append(estado)
+        if estado == "en_progreso" and not tarea["iniciado_en"]:
+            cambios.append("iniciado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+        if estado == "completada":
+            cambios.append("completado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+            _detener_sesion_activa(conn, tarea_id)
+    if "asignado_id" in data:
+        asignado_id = data["asignado_id"]
+        if asignado_id in (None, "", 0, "0"):
+            asignado_id = None
+        else:
+            try: asignado_id = int(asignado_id)
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "Responsable inválido."}), 400
+            asignado = _usuario_trabajo_valido(conn, asignado_id)
+            if not asignado or not puede_gestionar(actual["rol"], asignado["rol"]):
+                conn.close()
+                return jsonify({"error": "No tenés permisos para designar esa tarea."}), 403
+        cambios.append("asignado_id = ?"); valores.append(asignado_id)
+    if "fecha_limite" in data:
+        cambios.append("fecha_limite = ?"); valores.append(str(data["fecha_limite"]).strip() or None)
+    if "titulo" in data:
+        titulo = str(data["titulo"]).strip()
+        if not titulo:
+            conn.close(); return jsonify({"error": "El título no puede quedar vacío."}), 400
+        cambios.append("titulo = ?"); valores.append(titulo)
+    if "descripcion" in data:
+        cambios.append("descripcion = ?"); valores.append(str(data["descripcion"]).strip())
+    if not cambios:
+        conn.close()
+        return jsonify({"ok": True})
+    valores.append(tarea_id)
+    conn.execute("UPDATE tareas SET " + ", ".join(cambios) + " WHERE id = ?", tuple(valores))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/tareas/<int:tarea_id>/iniciar", methods=["POST"])
+@staff_required
+def iniciar_tarea(tarea_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close(); return jsonify({"error": "Tarea no encontrada."}), 404
+    if u["rol"] == "operativo" and tarea["asignado_id"] != u["id"]:
+        conn.close(); return jsonify({"error": "Esta tarea no está asignada a vos."}), 403
+    if tarea["estado"] in ("completada", "cancelada"):
+        conn.close(); return jsonify({"error": "La tarea ya no puede iniciarse."}), 400
+    _cerrar_sesion_activa(conn, u["id"])
+    ahora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE tareas SET estado = 'en_progreso', iniciado_en = COALESCE(iniciado_en, ?) WHERE id = ?", (ahora, tarea_id))
+    conn.execute("""
+        INSERT INTO sesiones_trabajo (tarea_id, cliente_id, usuario_id, inicio)
+        VALUES (?, ?, ?, ?)
+    """, (tarea_id, tarea["cliente_id"], u["id"], ahora))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "inicio": ahora, "tarea_id": tarea_id})
+
+@app.route("/api/admin/tareas/<int:tarea_id>/detener", methods=["POST"])
+@staff_required
+def detener_tarea(tarea_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close(); return jsonify({"error": "Tarea no encontrada."}), 404
+    if u["rol"] == "operativo" and tarea["asignado_id"] != u["id"]:
+        conn.close(); return jsonify({"error": "Esta tarea no está asignada a vos."}), 403
+    sesion = conn.execute("""
+        SELECT * FROM sesiones_trabajo
+        WHERE tarea_id = ? AND usuario_id = ? AND fin IS NULL
+        ORDER BY id DESC LIMIT 1
+    """, (tarea_id, u["id"])).fetchone()
+    if not sesion:
+        conn.close(); return jsonify({"error": "No hay un cronómetro activo para esta tarea."}), 400
+    fin = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE sesiones_trabajo SET fin = ? WHERE id = ?", (fin, sesion["id"]))
+    conn.execute("UPDATE tareas SET estado = CASE WHEN estado = 'en_progreso' THEN 'pendiente' ELSE estado END WHERE id = ?", (tarea_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "fin": fin})
+
+@app.route("/api/admin/tiempo/activo", methods=["GET"])
+@staff_required
+def tiempo_activo():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    sesion = conn.execute("""
+        SELECT s.*, t.titulo, c.nombre AS cliente_nombre
+        FROM sesiones_trabajo s
+        JOIN tareas t ON t.id = s.tarea_id
+        JOIN usuarios c ON c.id = s.cliente_id
+        WHERE s.usuario_id = ? AND s.fin IS NULL
+        ORDER BY s.id DESC LIMIT 1
+    """, (u["id"],)).fetchone()
+    conn.close()
+    return jsonify(dict(sesion) if sesion else None)
+
+@app.route("/api/admin/tiempo/resumen", methods=["GET"])
+@admin_required
+def resumen_tiempo():
+    conn = get_db()
+    filas = conn.execute("""
+        SELECT u.id, u.nombre, u.ruc,
+               COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas
+        FROM usuarios u
+        LEFT JOIN sesiones_trabajo s ON s.cliente_id = u.id
+        WHERE u.rol = 'contribuyente'
+        GROUP BY u.id, u.nombre, u.ruc
+        ORDER BY horas DESC, u.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in filas])
+
+@app.route("/api/admin/tiempo/<int:cliente_id>", methods=["GET"])
+@admin_required
+def detalle_tiempo_cliente(cliente_id):
+    conn = get_db()
+    if not _cliente_valido(conn, cliente_id):
+        conn.close(); return jsonify({"error": "Cliente no encontrado."}), 404
+    sesiones = conn.execute("""
+        SELECT s.*, t.titulo, u.nombre AS usuario_nombre
+        FROM sesiones_trabajo s
+        JOIN tareas t ON t.id = s.tarea_id
+        JOIN usuarios u ON u.id = s.usuario_id
+        WHERE s.cliente_id = ?
+        ORDER BY s.inicio DESC
+    """, (cliente_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(s) for s in sesiones])
+
