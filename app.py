@@ -45,6 +45,7 @@ SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 # ---------- Base de datos ----------
 def get_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
 def init_db():
@@ -764,8 +765,20 @@ def admin_eliminar_documento(doc_id):
     if not objetivo or not puede_gestionar(u_actual["rol"], objetivo["rol"]):
         conn.close()
         return jsonify({"error": "No tenés permisos para esta operación."}), 403
-    if os.path.exists(d["ruta"]):
-        os.remove(d["ruta"])
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real:
+            conn.close()
+            return jsonify({"error": "Ruta de documento inválida"}), 400
+        if os.path.exists(ruta):
+            if not os.path.isfile(ruta):
+                conn.close()
+                return jsonify({"error": "Documento no disponible"}), 404
+            os.remove(ruta)
+    except ValueError:
+        conn.close()
+        return jsonify({"error": "Ruta de documento inválida"}), 400
     conn.execute("DELETE FROM documentos WHERE id = ?", (doc_id,))
     conn.commit()
     conn.close()
