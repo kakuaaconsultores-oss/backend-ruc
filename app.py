@@ -161,25 +161,11 @@ def init_db():
     )""")
 
     conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
-    legacy = conn.execute("SELECT id FROM usuarios WHERE ruc = '80000000-0'").fetchone()
+    # El ADMIN histórico 80000000-0 se conserva como ADMIN. La cuenta
+    # SUPERADMIN es independiente y solo se crea mediante bootstrap.
     superadmin = conn.execute("SELECT id FROM usuarios WHERE rol = 'superadmin' LIMIT 1").fetchone()
     if superadmin:
         conn.execute("UPDATE usuarios SET rol = 'contribuyente' WHERE rol = 'superadmin' AND id != ?", (superadmin["id"],))
-    elif legacy:
-        superadmin_usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
-        conn.execute("UPDATE usuarios SET rol = 'superadmin', usuario = ? WHERE id = ?", (superadmin_usuario, legacy["id"]))
-    else:
-        usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
-        correo = os.environ.get("SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com").strip() or "kakuaaconsultores@gmail.com"
-        password = os.environ.get("SUPERADMIN_PASSWORD", "").strip()
-        if not password:
-            password = secrets.token_urlsafe(12)
-            print("[SEGURIDAD] SUPERADMIN_PASSWORD no configurada; se generó una contraseña temporal.")
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        conn.execute(
-            "INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, 'superadmin', 1)",
-            ("80000000-0", correo, "SUPERADMIN", hashed, usuario)
-        )
 
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_superadmin ON usuarios(rol) WHERE rol = 'superadmin'")
     conn.commit()
@@ -467,11 +453,15 @@ def superadmin_bootstrap():
             correo = os.environ.get(
                 "SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com"
             ).strip() or "kakuaaconsultores@gmail.com"
+            # SUPERADMIN es una cuenta técnica independiente del ADMIN/RUC 80000000-0.
+            # El RUC es NOT NULL + UNIQUE en el esquema histórico, por lo que usamos
+            # un identificador interno reservado que no puede confundirse con un RUC real.
+            ruc_superadmin = "SUPERADMIN-000000"
             cur = conn.execute(
                 """INSERT INTO usuarios
                    (ruc, correo, nombre, password_hash, activo, usuario, rol, debe_cambiar)
                    VALUES (?, ?, 'SUPERADMIN', ?, 1, ?, 'superadmin', 0)""",
-                ("80000000-0", correo, hash_password(nueva_password), usuario),
+                (ruc_superadmin, correo, hash_password(nueva_password), usuario),
             )
             usuario_id = cur.lastrowid
             accion = "superadmin_created"
