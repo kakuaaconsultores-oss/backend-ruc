@@ -470,12 +470,14 @@ def superadmin_bootstrap():
             "UPDATE superadmin_bootstrap SET usado = 1, usado_en = datetime('now') WHERE id = 1"
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
         conn.rollback()
+        app.logger.exception("Error de integridad durante bootstrap del SUPERADMIN: %s", exc)
         conn.close()
         return jsonify({"error": "No se pudo completar el bootstrap del SUPERADMIN."}), 409
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        app.logger.exception("Error inesperado durante bootstrap del SUPERADMIN: %s", exc)
         conn.close()
         return jsonify({"error": "No se pudo completar el bootstrap del SUPERADMIN."}), 500
 
