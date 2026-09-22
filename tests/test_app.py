@@ -163,6 +163,58 @@ class KakuaaApiTests(unittest.TestCase):
         )
         self.assertEqual(valid.status_code, 200)
 
+    def test_role_boundaries_and_role_change_revokes_session(self):
+        admin_id = self.add_user("admin1", "admin")
+        operativo_id = self.add_user("operativo1", "operativo")
+        contrib_id = self.add_user("contrib1", "contribuyente")
+        admin_csrf = self.verify(self.login("admin1"))
+        operativo_csrf = self.verify(self.login("operativo1"))
+        contrib_csrf = self.verify(self.login("contrib1"))
+
+        # Operativo puede gestionar contribuyentes, pero no administradores/operativos.
+        denied_admin = self.client.get(f"/api/admin/usuarios/{admin_id}/documentos", headers=self.auth(operativo_csrf))
+        self.assertEqual(denied_admin.status_code, 403)
+        promote_operativo = self.client.put(
+            f"/api/admin/usuarios/{contrib_id}/rol",
+            headers=self.auth(operativo_csrf),
+            json={"rol": "operativo"},
+        )
+        self.assertEqual(promote_operativo.status_code, 403)
+
+        # Contribuyente no puede consultar ni mutar el módulo administrativo.
+        self.assertEqual(self.client.get("/api/admin/usuarios", headers=self.auth(contrib_csrf)).status_code, 401)
+        self.assertEqual(self.client.get("/api/admin/usuarios", headers=self.auth(contrib_csrf)).status_code, 401)
+
+        # Admin puede promover un contribuyente a operativo.
+        promote = self.client.put(
+            f"/api/admin/usuarios/{contrib_id}/rol",
+            headers=self.auth(admin_csrf),
+            json={"rol": "operativo"},
+        )
+        self.assertEqual(promote.status_code, 200)
+
+        # Cambiar el rol revoca la sesión del usuario objetivo.
+        conn = get_db()
+        row = conn.execute("SELECT token_sesion_hash FROM usuarios WHERE id=?", (contrib_id,)).fetchone()
+        conn.close()
+        self.assertIsNone(row["token_sesion_hash"])
+
+        # Admin no puede crear otro admin.
+        create_admin = self.client.post(
+            "/api/admin/usuarios",
+            headers=self.auth(admin_csrf),
+            json={"ruc": "new-admin", "correo": "new-admin@test.local", "nombre": "Nuevo", "usuario": "newadmin", "contrasena": "Test123!", "rol": "admin"},
+        )
+        self.assertEqual(create_admin.status_code, 403)
+
+        # SUPERADMIN no puede ser modificado mediante cambio de rol.
+        superadmin = self.client.put(
+            f"/api/admin/usuarios/{self.superadmin_id}/rol",
+            headers=self.auth(admin_csrf),
+            json={"rol": "operativo"},
+        )
+        self.assertEqual(superadmin.status_code, 403)
+
     def test_password_lockout_after_five_failures(self):
         self.add_user("locked")
         for attempt in range(1, 6):
