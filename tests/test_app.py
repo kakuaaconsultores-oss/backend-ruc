@@ -510,12 +510,13 @@ class KakuaaApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+        # El mecanismo antiguo de contraseña manual ya no existe.
         response = self.client.post(
             f"/api/admin/usuarios/{target_id}/reset-password",
             headers=self.auth(admin_token),
             json={"nueva_password": "New123!"},
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 404)
 
         response = self.client.put(
             f"/api/admin/usuarios/{target_id}/estado",
