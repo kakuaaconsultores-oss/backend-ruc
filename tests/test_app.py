@@ -463,7 +463,14 @@ class KakuaaApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/cambiar-password",
             headers=self.auth(token),
-            json={"nueva_password": "Changed123!"},
+            json={"password_actual": "Wrong123!", "nueva_password": "Changed123!"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+        response = self.client.post(
+            "/api/cambiar-password",
+            headers=self.auth(token),
+            json={"password_actual": "Test123!", "nueva_password": "Changed123!"},
         )
         self.assertEqual(response.status_code, 200)
 
