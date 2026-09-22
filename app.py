@@ -196,7 +196,7 @@ if DB_BACKEND == "postgres":
         def execute(self, query, params=None, *, prepare=None, binary=False):
             return super().execute(_adapt_postgres_sql(query), params, prepare=prepare, binary=binary)
     def get_db():
-        return psycopg.connect(DATABASE_URL, row_factory=dict_row, connection_class=CompatPGConnection)
+        return CompatPGConnection.connect(DATABASE_URL, row_factory=dict_row)
 else:
     def get_db():
         conn = sqlite3.connect(DB_PATH)
@@ -1161,7 +1161,7 @@ def crear_usuario():
                                            (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
         conn.commit()
         return jsonify({"ok": True, "id": usuario_id}), 201
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
