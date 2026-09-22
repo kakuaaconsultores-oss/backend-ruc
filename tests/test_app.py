@@ -32,6 +32,7 @@ class KakuaaApiTests(unittest.TestCase):
     def setUp(self):
         conn = get_db()
         conn.execute("DELETE FROM login_otp")
+        conn.execute("DELETE FROM rate_limit_events")
         conn.execute("DELETE FROM documentos")
         conn.execute("DELETE FROM subcarpetas")
         conn.execute("DELETE FROM tickets_recuperacion")
@@ -86,6 +87,33 @@ class KakuaaApiTests(unittest.TestCase):
 
     def auth(self, token):
         return {"Authorization": f"Bearer {token}"}
+
+    def test_ip_rate_limits_protect_public_auth_endpoints(self):
+        for _ in range(10):
+            response = self.client.post(
+                "/api/login",
+                json={"usuario": "unknown-rate-limit", "password": "Wrong123!"},
+            )
+            self.assertEqual(response.status_code, 401)
+        response = self.client.post(
+            "/api/login",
+            json={"usuario": "unknown-rate-limit", "password": "Wrong123!"},
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertTrue(response.get_json()["rate_limited"])
+
+        for _ in range(5):
+            response = self.client.post(
+                "/api/solicitar-reset",
+                json={"ruc": "80000000-0"},
+            )
+            self.assertEqual(response.status_code, 200)
+        response = self.client.post(
+            "/api/solicitar-reset",
+            json={"ruc": "80000000-0"},
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertTrue(response.get_json()["rate_limited"])
 
     def test_login_otp_and_session(self):
         self.add_user("contrib")
