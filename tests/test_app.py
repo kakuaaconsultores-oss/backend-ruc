@@ -12,7 +12,7 @@ os.environ["SUPERADMIN_PASSWORD"] = "Super123!"
 os.environ["SUPERADMIN_EMAIL"] = "superadmin@test.local"
 os.environ["COOKIE_SECURE"] = "0"
 os.environ["SESSION_COOKIE_NAME"] = "kakuaa_test_session"
-os.environ["SUPERADMIN_BOOTSTRAP_SECRET"] = "test-bootstrap-secret-" + "x" * 40
+os.environ["SUPERADMIN_BOOTSTRAP_SECRET"] = "test-bootstrap-secret-á-" + "x" * 31
 
 from app import app, get_db, hash_password
 
