@@ -381,5 +381,122 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertIn(response.status_code, (403, 401))
 
 
+
+    def test_admin_cannot_manage_another_admin(self):
+        self.add_user("admin-owner", "admin")
+        target_id = self.add_user("admin-target", "admin")
+        admin_token = self.verify(self.login("admin-owner"))
+
+        response = self.client.put(
+            f"/api/admin/usuarios/{target_id}",
+            headers=self.auth(admin_token),
+            json={"ruc": "new-ruc", "correo": "new@test.local", "nombre": "Nuevo"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.post(
+            f"/api/admin/usuarios/{target_id}/reset-password",
+            headers=self.auth(admin_token),
+            json={"nueva_password": "New123!"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.put(
+            f"/api/admin/usuarios/{target_id}/estado",
+            headers=self.auth(admin_token),
+            json={"activo": False},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.put(
+            f"/api/admin/usuarios/{target_id}/rol",
+            headers=self.auth(admin_token),
+            json={"rol": "operativo"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.get(
+            f"/api/admin/usuarios/{target_id}/documentos",
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+    def test_password_change_invalidates_existing_session(self):
+        self.add_user("change-password")
+        token = self.verify(self.login("change-password"))
+
+        response = self.client.post(
+            "/api/cambiar-password",
+            headers=self.auth(token),
+            json={"nueva_password": "Changed123!"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        response = self.client.get(
+            "/api/mis-documentos",
+            headers=self.auth(token),
+        )
+        self.assertEqual(response.status_code, 401)
+
+        challenge = self.login("change-password", "Changed123!")
+        self.assertTrue(challenge)
+
+
+    def test_recovery_approval_revokes_session_and_keeps_no_plaintext_password(self):
+        self.add_user("recover-approved")
+        self.add_user("recovery-admin", "admin")
+
+        old_token = self.verify(self.login("recover-approved"))
+
+        request_reset = self.client.post(
+            "/api/solicitar-reset",
+            json={"ruc": "recover-approved-ruc"},
+        )
+        self.assertEqual(request_reset.status_code, 200)
+
+        conn = get_db()
+        ticket = conn.execute(
+            "SELECT id FROM tickets_recuperacion WHERE usuario_id = ?",
+            (self._user_id("recover-approved"),),
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(ticket)
+
+        admin_token = self.verify(self.login("recovery-admin"))
+        response = self.client.post(
+            f"/api/admin/tickets/{ticket["id"]}/aprobar",
+            headers=self.auth(admin_token),
+            json={"nueva_password": "Reset123!"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(
+            self.client.get(
+                "/api/mis-documentos",
+                headers=self.auth(old_token),
+            ).status_code,
+            401,
+        )
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT estado, nueva_password FROM tickets_recuperacion WHERE id = ?",
+            (ticket["id"],),
+        ).fetchone()
+        user = conn.execute(
+            "SELECT debe_cambiar FROM usuarios WHERE usuario = ?",
+            ("recover-approved",),
+        ).fetchone()
+        conn.close()
+
+        self.assertEqual(row["estado"], "aprobado")
+        self.assertIsNone(row["nueva_password"])
+        self.assertEqual(user["debe_cambiar"], 1)
+
+        challenge = self.login("recover-approved", "Reset123!")
+        self.assertTrue(challenge)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
