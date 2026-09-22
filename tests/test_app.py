@@ -38,7 +38,7 @@ class KakuaaApiTests(unittest.TestCase):
         conn.execute("DELETE FROM tickets_recuperacion")
         conn.execute("DELETE FROM usuarios WHERE rol != 'superadmin'")
         conn.execute("""UPDATE usuarios SET intentos_fallidos=0, bloqueo_hasta=NULL,
-                        token_sesion=NULL, token_sesion_hash=NULL, token_expira_en=NULL,
+                        token_sesion=NULL, token_sesion_hash=NULL, csrf_token_hash=NULL, token_expira_en=NULL,
                         debe_cambiar=0, activo=1
                         WHERE rol='superadmin'""")
         conn.commit()
@@ -83,10 +83,10 @@ class KakuaaApiTests(unittest.TestCase):
             "/api/login/verify-otp", json={"challenge": challenge, "otp": otp}
         )
         self.assertEqual(response.status_code, 200, response.get_json())
-        return response.get_json()["token"]
+        return response.get_json()["csrf_token"]
 
     def auth(self, token):
-        return {"Authorization": f"Bearer {token}"}
+        return {"X-CSRF-Token": token}
 
     def test_ip_rate_limits_protect_public_auth_endpoints(self):
         for _ in range(10):
@@ -126,8 +126,9 @@ class KakuaaApiTests(unittest.TestCase):
             "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
         )
         self.assertEqual(good.status_code, 200)
-        token = good.get_json()["token"]
+        token = good.get_json()["csrf_token"]
         self.assertTrue(token)
+        self.assertIsNotNone(self.client.get_cookie("__Host-kakuaa_session"))
         self.assertEqual(
             self.client.get("/api/mis-documentos", headers=self.auth(token)).status_code,
             200,
