@@ -16,8 +16,13 @@ from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "usuarios.db"))
-DOCS_DIR = os.environ.get("DOCS_DIR", os.path.join(BASE_DIR, "documentos"))
+# Render usa un filesystem efímero salvo que el servicio tenga un Persistent Disk.
+# En producción configuramos PERSISTENT_DATA_DIR=/var/data; localmente se conserva BASE_DIR.
+PERSISTENT_DATA_DIR = os.environ.get("PERSISTENT_DATA_DIR", BASE_DIR)
+DB_PATH = os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db"))
+DOCS_DIR = os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR, "documentos"))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+os.makedirs(DOCS_DIR, exist_ok=True)
 
 MAX_INTENTOS = 5
 BLOQUEO_MINUTOS = 30

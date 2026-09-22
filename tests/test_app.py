@@ -785,7 +785,9 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(reused.status_code, 400)
 
         challenge = self.login("recover-approved", "Reset123!")
-        self.assertTrue(challenge)    def test_ip_rate_limits_protect_public_auth_endpoints(self):
+        self.assertTrue(challenge)
+
+    def test_ip_rate_limits_protect_public_auth_endpoints(self):
         for _ in range(10):
             response = self.client.post(
                 "/api/login",
