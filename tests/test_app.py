@@ -92,6 +92,36 @@ class KakuaaApiTests(unittest.TestCase):
     def auth(self, token):
         return {"X-CSRF-Token": token}
 
+    def test_legacy_admin_is_not_promoted_to_superadmin_and_bootstrap_creates_separate_account(self):
+        admin_id = self.add_user("admin-legacy", "admin", ruc="80000000-0")
+        conn = get_db()
+        row = conn.execute("SELECT rol, usuario FROM usuarios WHERE id=?", (admin_id,)).fetchone()
+        self.assertEqual(row["rol"], "admin")
+        conn.close()
+
+        response = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "NewSuper123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(data["accion"], "superadmin_created")
+        self.assertEqual(data["usuario"], "superadmin-test")
+
+        conn = get_db()
+        admin = conn.execute("SELECT rol FROM usuarios WHERE id=?", (admin_id,)).fetchone()
+        superadmin = conn.execute(
+            "SELECT ruc, rol, usuario FROM usuarios WHERE rol='superadmin'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(admin["rol"], "admin")
+        self.assertEqual(superadmin["ruc"], "SUPERADMIN-000000")
+        self.assertEqual(superadmin["rol"], "superadmin")
+        self.assertEqual(superadmin["usuario"], "superadmin-test")
+
     def test_superadmin_bootstrap_is_one_time_and_invalidates_sessions(self):
         csrf = self.verify(self.login("superadmin-test", "Super123!"))
 
