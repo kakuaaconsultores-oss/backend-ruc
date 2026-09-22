@@ -28,7 +28,7 @@ RESET_TOKEN_HORAS = 1
 MAX_UPLOAD_MB = 16
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
 MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-SESSION_COOKIE_NAME = "__Host-kakuaa_session"
+SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "__Host-kakuaa_session")
 CSRF_HEADER_NAME = "X-CSRF-Token"
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") == "1"
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "None")
