@@ -1000,6 +1000,366 @@ def rechazar_ticket(ticket_id):
         return jsonify({"error": "Ticket no encontrado"}), 404
     if t["estado"] != "pendiente":
         conn.close()
+        return jsonify({"error": "Este ticket ya fue resuelto"}), 400
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario asociado no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
+    conn.execute("UPDATE tickets_recuperacion SET estado = 'rechazado', resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "message": "Ticket rechazado"})
+
+# Admin: listar usuarios
+@app.route("/api/admin/usuarios", methods=["GET"])
+@staff_required
+def listar_usuarios():
+    u_actual = obtener_usuario_por_token()
+    roles_visibles = [rol for rol in ROLES if puede_gestionar(u_actual["rol"], rol)]
+    if not roles_visibles:
+        return jsonify([])
+    placeholders = ",".join("?" for _ in roles_visibles)
+    conn = get_db()
+    usuarios = conn.execute(
+        f"SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios "
+        f"WHERE rol IN ({placeholders}) "
+        "ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id",
+        roles_visibles,
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(u) for u in usuarios])
+
+# Admin: crear usuario (marca debe_cambiar para forzar cambio en primer ingreso)
+@app.route("/api/admin/usuarios", methods=["POST"])
+@staff_required
+def crear_usuario():
+    data = request.get_json() or {}
+    ruc = data.get("ruc", "").strip()
+    correo = data.get("correo", "").strip()
+    nombre = data.get("nombre", "").strip()
+    usuario_nuevo = data.get("usuario", "").strip() or ruc
+    contrasena = data.get("contrasena", "")
+    rol_nuevo = data.get("rol", "contribuyente").strip()
+    if not ruc or not correo or not nombre or not contrasena or not usuario_nuevo:
+        return jsonify({"error": "Faltan datos"}), 400
+    error_password = validar_politica_password(contrasena)
+    if error_password:
+        return jsonify({"error": error_password}), 400
+    if rol_nuevo not in ("admin", "operativo", "contribuyente"):
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
+    u_actual = obtener_usuario_por_token()
+    if not puede_gestionar(u_actual["rol"], rol_nuevo):
+        return jsonify({"error": "No tenés permisos para crear este rol."}), 403
+    conn = get_db()
+    try:
+        hashed = hash_password(contrasena)
+        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                           (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
+        conn.commit()
+        return jsonify({"ok": True, "id": cur.lastrowid}), 201
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "El RUC o correo ya existe"}), 409
+
+# Admin: editar usuario (invalida token si cambia RUC o desactiva)
+@app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
+@staff_required
+def editar_usuario(usuario_id):
+    data = request.get_json() or {}
+    ruc = data.get("ruc", "").strip()
+    correo = data.get("correo", "").strip()
+    nombre = data.get("nombre", "").strip()
+    conn = get_db()
+    u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not u:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    u_actual = obtener_usuario_por_token()
+    if u["rol"] == "superadmin" or not puede_gestionar(u_actual["rol"], u["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para editar este usuario."}), 403
+    if not ruc or not correo or not nombre:
+        conn.close()
+        return jsonify({"error": "RUC, correo y nombre son obligatorios."}), 400
+    try:
+        conn.execute("UPDATE usuarios SET ruc = ?, correo = ?, nombre = ? WHERE id = ?", (ruc, correo, nombre, usuario_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "El RUC o correo ya existe"}), 409
+
+# La recuperación administrativa usa exclusivamente tickets + enlaces de un solo uso.\n# No se permite establecer ni enviar contraseñas manualmente desde el panel.\n\n# Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
+@app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
+@staff_required
+def cambiar_estado(usuario_id):
+    data = request.get_json() or {}
+    activo = bool(data.get("activo"))
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if objetivo["rol"] == "superadmin":
+        conn.close()
+        return jsonify({"error": "No se puede deshabilitar al SUPERADMIN."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.execute(
+        "UPDATE usuarios SET activo = ?, "
+        "token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, "
+        "token_sesion_hash = CASE WHEN ? = 0 THEN NULL ELSE token_sesion_hash END, "
+        "csrf_token_hash = CASE WHEN ? = 0 THEN NULL ELSE csrf_token_hash END, "
+        "token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END "
+        "WHERE id = ?",
+        (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Admin: asignar rol
+@app.route("/api/admin/usuarios/<int:usuario_id>/rol", methods=["PUT"])
+@staff_required
+def asignar_rol(usuario_id):
+    data = request.get_json() or {}
+    nuevo_rol = data.get("rol", "").strip()
+    if nuevo_rol not in ROLES or nuevo_rol == "superadmin":
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if objetivo["rol"] == "superadmin":
+        conn.close()
+        return jsonify({"error": "El SUPERADMIN es único y no puede ser modificado desde este módulo."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.execute("UPDATE usuarios SET rol = ?, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_rol, usuario_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "message": "Rol actualizado"})
+
+@app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
+@staff_required
+def admin_documentos(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ? ORDER BY subido_en DESC", (usuario_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(d) for d in docs])
+
+# Admin: subir documento
+@app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["POST"])
+@staff_required
+def admin_subir_documento(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.close()
+
+    archivo = request.files.get("archivo")
+    carpeta = request.form.get("carpeta", "")
+    subcarpeta = request.form.get("subcarpeta", "")
+    subcarpeta2 = request.form.get("subcarpeta2", "")
+    if not archivo or not carpeta:
+        return jsonify({"error": "Faltan datos"}), 400
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas:
+        return jsonify({"error": "Carpeta no permitida"}), 400
+    nombre_archivo = secure_filename(archivo.filename or "")
+    if not nombre_archivo:
+        return jsonify({"error": "Nombre de archivo inválido"}), 400
+    extension = nombre_archivo.rsplit(".", 1)[1].lower() if "." in nombre_archivo else ""
+    if extension not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": "Tipo de archivo no permitido"}), 400
+    subcarpeta = secure_filename(subcarpeta) if subcarpeta else ""
+    subcarpeta2 = secure_filename(subcarpeta2) if subcarpeta2 else ""
+    try:
+        dir_usuario = ruta_segura(DOCS_DIR, str(usuario_id))
+        dir_carpeta = ruta_segura(dir_usuario, carpeta)
+        if subcarpeta:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta)
+        if subcarpeta2:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta2)
+        ruta = ruta_segura(dir_carpeta, nombre_archivo)
+    except ValueError:
+        return jsonify({"error": "Ruta de archivo inválida"}), 400
+    os.makedirs(dir_carpeta, exist_ok=True)
+    archivo.save(ruta)
+    conn = get_db()
+    cur = conn.execute("INSERT INTO documentos (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2) VALUES (?, ?, ?, ?, ?, ?)",
+                       (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "id": cur.lastrowid}), 201
+
+# Admin: eliminar documento
+@app.route("/api/admin/documentos/<int:doc_id>", methods=["DELETE"])
+@staff_required
+def admin_eliminar_documento(doc_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    d = conn.execute("SELECT * FROM documentos WHERE id = ?", (doc_id,)).fetchone()
+    if not d:
+        conn.close()
+        return jsonify({"error": "Documento no encontrado"}), 404
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (d["usuario_id"],)).fetchone()
+    if not objetivo or not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real:
+            conn.close()
+            return jsonify({"error": "Ruta de documento inválida"}), 400
+        if os.path.exists(ruta):
+            if not os.path.isfile(ruta):
+                conn.close()
+                return jsonify({"error": "Documento no disponible"}), 404
+            os.remove(ruta)
+    except ValueError:
+        conn.close()
+        return jsonify({"error": "Ruta de documento inválida"}), 400
+    conn.execute("DELETE FROM documentos WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Admin: subcarpetas de un usuario
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["GET"])
+@staff_required
+def admin_subcarpetas(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    subs = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ?", (usuario_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(s) for s in subs])
+
+# Admin: crear subcarpeta
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["POST"])
+@staff_required
+def admin_crear_subcarpeta(usuario_id):
+    data = request.get_json() or {}
+    carpeta = data.get("carpeta", "")
+    nombre = secure_filename(data.get("nombre", "").strip())
+    padre = secure_filename(data.get("padre", "").strip()) if data.get("padre") else ""
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas or not nombre:
+        return jsonify({"error": "Datos de subcarpeta inválidos"}), 400
+    conn = get_db()
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    if padre:
+        parent = conn.execute(
+            "SELECT id FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ?",
+            (usuario_id, carpeta, padre)
+        ).fetchone()
+        if not parent:
+            conn.close()
+            return jsonify({"error": "Subcarpeta padre no encontrada"}), 404
+    existe = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ? AND padre = ?",
+                          (usuario_id, carpeta, nombre, padre)).fetchone()
+    if existe:
+        conn.close()
+        return jsonify({"error": "Esa subcarpeta ya existe"}), 409
+    conn.execute("INSERT INTO subcarpetas (usuario_id, carpeta, nombre, padre) VALUES (?, ?, ?, ?)",
+                 (usuario_id, carpeta, nombre, padre))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True}), 201
+
+# Admin: eliminar subcarpeta
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas/<path:nombre>", methods=["DELETE"])
+@staff_required
+def admin_eliminar_subcarpeta(usuario_id, nombre):
+    u_actual = obtener_usuario_por_token()
+    nombre = secure_filename(nombre)
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    s = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND nombre = ?", (usuario_id, nombre)).fetchone()
+    if not s:
+        conn.close()
+        return jsonify({"error": "Subcarpeta no encontrada"}), 404
+    conn.execute("DELETE FROM subcarpetas WHERE usuario_id = ? AND padre = ?", (usuario_id, nombre))
+    conn.execute("DELETE FROM documentos WHERE usuario_id = ? AND subcarpeta = ?", (usuario_id, nombre))
+    conn.execute("DELETE FROM subcarpetas WHERE id = ?", (s["id"],))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Contribuyente: sus documentos
+@app.route("/api/mis-documentos", methods=["GET"])
+@usuario_required
+def mis_documentos():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ?", (u["id"],)).fetchall()
+    conn.close()
+    return jsonify([dict(d) for d in docs])
+
+# Contribuyente: descargar documento
+@app.route("/api/mis-documentos/<int:doc_id>/descargar", methods=["GET"])
+@usuario_required
+def descargar_documento(doc_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    d = conn.execute("SELECT * FROM documentos WHERE id = ? AND usuario_id = ?", (doc_id, u["id"])).fetchone()
+    conn.close()
+    if not d:
+        return jsonify({"error": "No autorizado"}), 403
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real or not os.path.isfile(ruta):
+            return jsonify({"error": "Documento no disponible"}), 404
+    except ValueError:
+        return jsonify({"error": "Ruta de documento inválida"}), 400
+    return send_from_directory(os.path.dirname(ruta), os.path.basename(ruta), as_attachment=True)
+
 
 # ---------- SUPERADMIN: artículos, tarifas y costos ----------
 def _tarifa_vigente(conn, articulo_id, fecha):
@@ -1598,3 +1958,7 @@ def detalle_tiempo_cliente(cliente_id):
     conn.close()
     return jsonify([dict(s) for s in sesiones])
 
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
