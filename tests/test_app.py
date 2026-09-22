@@ -253,6 +253,50 @@ class KakuaaApiTests(unittest.TestCase):
         )
         self.assertEqual(blocked.status_code, 404)
 
+    def test_session_expiration_is_enforced_server_side(self):
+        self.add_user("expired-session")
+        token = self.verify(self.login("expired-session"))
+        conn = get_db()
+        conn.execute(
+            "UPDATE usuarios SET token_expira_en=? WHERE usuario=?",
+            ((datetime.utcnow() - timedelta(minutes=1)).isoformat(), "expired-session"),
+        )
+        conn.commit()
+        conn.close()
+        response = self.client.get(
+            "/api/mis-documentos", headers=self.auth(token)
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_document_delete_rejects_path_outside_docs(self):
+        self.add_user("admin-delete", "admin")
+        user_id = self.add_user("delete-target")
+        admin_token = self.verify(self.login("admin-delete"))
+        upload = self.client.post(
+            f"/api/admin/usuarios/{user_id}/documentos",
+            headers=self.auth(admin_token),
+            data={
+                "carpeta": "Facturas",
+                "archivo": (BytesIO(b"hola"), "factura.pdf"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload.status_code, 201, upload.get_json())
+        doc_id = upload.get_json()["id"]
+        outside = os.path.join(TEST_DIR, "outside-delete.pdf")
+        with open(outside, "wb") as fh:
+            fh.write(b"outside")
+        conn = get_db()
+        conn.execute("UPDATE documentos SET ruta=? WHERE id=?", (outside, doc_id))
+        conn.commit()
+        conn.close()
+        response = self.client.delete(
+            f"/api/admin/documentos/{doc_id}",
+            headers=self.auth(admin_token),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(os.path.isfile(outside))
+
     def test_recovery_request_is_generic_for_unknown_ruc(self):
         known = self.add_user("recover")
         known_response = self.client.post(
