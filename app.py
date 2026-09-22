@@ -38,20 +38,21 @@ def _copiar_archivos_faltantes(origen, destino):
                 shutil.copy2(origen_archivo, destino_archivo)
 
 
-def _migrar_almacenamiento_persistente():
+def _migrar_almacenamiento_persistente(base_dir=None, persistent_dir=None):
     """Migra una instalación existente de /app al Persistent Disk una sola vez.
 
     Se ejecuta antes de abrir la base principal. La copia SQLite se realiza con
     sqlite3.backup() para obtener una base consistente y luego se corrigen las
     rutas absolutas de documentos que antes apuntaban al filesystem efímero.
     """
-    if os.path.abspath(PERSISTENT_DATA_DIR) == os.path.abspath(BASE_DIR):
+    base_dir = os.path.abspath(base_dir or BASE_DIR)
+    persistent_dir = os.path.abspath(persistent_dir or PERSISTENT_DATA_DIR)
+    if persistent_dir == base_dir:
         return
 
-    persistent_dir = os.path.abspath(PERSISTENT_DATA_DIR)
-    legacy_db = os.path.join(BASE_DIR, "usuarios.db")
+    legacy_db = os.path.join(base_dir, "usuarios.db")
     persistent_db = os.path.join(persistent_dir, "usuarios.db")
-    legacy_docs = os.path.join(BASE_DIR, "documentos")
+    legacy_docs = os.path.join(base_dir, "documentos")
     persistent_docs = os.path.join(persistent_dir, "documentos")
     os.makedirs(persistent_dir, exist_ok=True)
 
