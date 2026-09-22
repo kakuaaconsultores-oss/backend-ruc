@@ -266,6 +266,16 @@ def admin_required(f):
         return f(*args, **kwargs)
     return wrapper
 
+def staff_required(f):
+    """Permite operaciones de gestión a SUPERADMIN, ADMIN y OPERATIVO."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        u = obtener_usuario_por_token()
+        if not u or u["rol"] not in ("superadmin", "admin", "operativo"):
+            return jsonify({"error": "No autorizado"}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
 def usuario_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -523,7 +533,7 @@ def rechazar_ticket(ticket_id):
 
 # Admin: listar usuarios
 @app.route("/api/admin/usuarios", methods=["GET"])
-@admin_required
+@staff_required
 def listar_usuarios():
     conn = get_db()
     usuarios = conn.execute("SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id").fetchall()
@@ -532,7 +542,7 @@ def listar_usuarios():
 
 # Admin: crear usuario (marca debe_cambiar para forzar cambio en primer ingreso)
 @app.route("/api/admin/usuarios", methods=["POST"])
-@admin_required
+@staff_required
 def crear_usuario():
     data = request.get_json() or {}
     ruc = data.get("ruc", "").strip()
@@ -564,7 +574,7 @@ def crear_usuario():
 
 # Admin: editar usuario (invalida token si cambia RUC o desactiva)
 @app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
-@admin_required
+@staff_required
 def editar_usuario(usuario_id):
     data = request.get_json() or {}
     ruc = data.get("ruc", "").strip()
@@ -593,7 +603,7 @@ def editar_usuario(usuario_id):
 
 # Admin: resetear contraseña manual (fuerza cambio, invalida token viejo)
 @app.route("/api/admin/usuarios/<int:usuario_id>/reset-password", methods=["POST"])
-@admin_required
+@staff_required
 def resetear_password(usuario_id):
     data = request.get_json() or {}
     nueva_password = data.get("nueva_password", "")
@@ -627,7 +637,7 @@ def resetear_password(usuario_id):
 
 # Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
 @app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
-@admin_required
+@staff_required
 def cambiar_estado(usuario_id):
     data = request.get_json() or {}
     activo = bool(data.get("activo"))
@@ -650,7 +660,7 @@ def cambiar_estado(usuario_id):
 
 # Admin: asignar rol
 @app.route("/api/admin/usuarios/<int:usuario_id>/rol", methods=["PUT"])
-@admin_required
+@staff_required
 def asignar_rol(usuario_id):
     data = request.get_json() or {}
     nuevo_rol = data.get("rol", "").strip()
@@ -674,7 +684,7 @@ def asignar_rol(usuario_id):
     return jsonify({"ok": True, "message": "Rol actualizado"})
 
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
-@admin_required
+@staff_required
 def admin_documentos(usuario_id):
     u_actual = obtener_usuario_por_token()
     conn = get_db()
@@ -691,7 +701,7 @@ def admin_documentos(usuario_id):
 
 # Admin: subir documento
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["POST"])
-@admin_required
+@staff_required
 def admin_subir_documento(usuario_id):
     u_actual = obtener_usuario_por_token()
     conn = get_db()
@@ -742,7 +752,7 @@ def admin_subir_documento(usuario_id):
 
 # Admin: eliminar documento
 @app.route("/api/admin/documentos/<int:doc_id>", methods=["DELETE"])
-@admin_required
+@staff_required
 def admin_eliminar_documento(doc_id):
     u_actual = obtener_usuario_por_token()
     conn = get_db()
@@ -763,7 +773,7 @@ def admin_eliminar_documento(doc_id):
 
 # Admin: subcarpetas de un usuario
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["GET"])
-@admin_required
+@staff_required
 def admin_subcarpetas(usuario_id):
     u_actual = obtener_usuario_por_token()
     conn = get_db()
@@ -780,7 +790,7 @@ def admin_subcarpetas(usuario_id):
 
 # Admin: crear subcarpeta
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["POST"])
-@admin_required
+@staff_required
 def admin_crear_subcarpeta(usuario_id):
     data = request.get_json() or {}
     carpeta = data.get("carpeta", "")
@@ -819,7 +829,7 @@ def admin_crear_subcarpeta(usuario_id):
 
 # Admin: eliminar subcarpeta
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas/<path:nombre>", methods=["DELETE"])
-@admin_required
+@staff_required
 def admin_eliminar_subcarpeta(usuario_id, nombre):
     u_actual = obtener_usuario_por_token()
     nombre = secure_filename(nombre)
