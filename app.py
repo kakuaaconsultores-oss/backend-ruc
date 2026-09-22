@@ -33,29 +33,27 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 def init_db():
     conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ruc TEXT UNIQUE NOT NULL,
-            correo TEXT UNIQUE NOT NULL,
-            nombre TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            activo INTEGER DEFAULT 1,
-            intentos_fallidos INTEGER DEFAULT 0,
-            bloqueo_hasta TEXT DEFAULT NULL,
-            token_sesion TEXT DEFAULT NULL,
-            debe_cambiar INTEGER DEFAULT 0,
-            creado_en TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    # Agrega la columna debe_cambiar si la base ya existía sin ella
+    conn.execute("""CREATE TABLE IF NOT EXISTS usuarios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ruc TEXT UNIQUE NOT NULL,
+        correo TEXT UNIQUE NOT NULL,
+        nombre TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        activo INTEGER DEFAULT 1,
+        intentos_fallidos INTEGER DEFAULT 0,
+        bloqueo_hasta TEXT DEFAULT NULL,
+        token_sesion TEXT DEFAULT NULL,
+        rol TEXT DEFAULT 'contribuyente',
+        creado_en TEXT DEFAULT (datetime('now'))
+    )""")
+    # Si la tabla ya existía sin la columna rol, la agregamos
     try:
-        conn.execute("ALTER TABLE usuarios ADD COLUMN debe_cambiar INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # Ya existe la columna
+        conn.execute("ALTER TABLE usuarios ADD COLUMN rol TEXT DEFAULT 'contribuyente'")
+    except Exception:
+        pass  # Ya existe
+    ...
     conn.execute("""
         CREATE TABLE IF NOT EXISTS documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,12 +157,23 @@ def obtener_usuario_por_token():
     if not u or not u["activo"]:
         return None
     return u
+ROLES = ['superadmin', 'admin', 'operativo', 'contribuyente']
+
+def puede_gestionar(rol_actual, rol_objetivo):
+    """Jerarquía: quién puede gestionar a quién."""
+    jerarquia = {
+        'superadmin': ['superadmin', 'admin', 'operativo', 'contribuyente'],
+        'admin': ['operativo', 'contribuyente'],
+        'operativo': ['contribuyente'],
+        'contribuyente': []
+    }
+    return rol_objetivo in jerarquia.get(rol_actual, [])
 
 def admin_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         u = obtener_usuario_por_token()
-        if not u or u["ruc"] != "80000000-0":
+        if not u or u["rol"] not in ("superadmin", "admin"):
             return jsonify({"error": "No autorizado"}), 401
         return f(*args, **kwargs)
     return wrapper
@@ -186,6 +195,7 @@ def healthz():
 
 # Login con límite de intentos y token de sesión
 @app.route("/api/login", methods=["POST"])
+return jsonify({"ok": True, "token": token, "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"], "rol": u["rol"]}})
 def login():
     data = request.get_json() or {}
     ruc = data.get("ruc", "").strip()
@@ -433,26 +443,34 @@ def resetear_password(usuario_id):
     return jsonify({"ok": True, "message": "Contraseña actualizada y correo enviado"})
 
 # Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
-@app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
+@app.route("/api/admin/usuarios/<int:usuario_id>/rol", methods=["PUT"])
 @admin_required
-def cambiar_estado(usuario_id):
+def asignar_rol(usuario_id):
     data = request.get_json() or {}
-    activo = data.get("activo")
+    nuevo_rol = data.get("rol", "")
+    if nuevo_rol not in ROLES:
+        return jsonify({"error": "Rol inválido"}), 400
+    u_actual = obtener_usuario_por_token()
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
-    if not u:
+    u_objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not u_objetivo:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u["ruc"] == "80000000-0":
+    # Reglas de jerarquía
+    if nuevo_rol == 'admin' and u_actual["rol"] != 'superadmin':
         conn.close()
-        return jsonify({"error": "No podés deshabilitar al administrador principal"}), 403
-    if not activo:
-        conn.execute("UPDATE usuarios SET activo = 0, token_sesion = NULL WHERE id = ?", (usuario_id,))
-    else:
-        conn.execute("UPDATE usuarios SET activo = 1 WHERE id = ?", (usuario_id,))
+        return jsonify({"error": "Solo el superadmin puede asignar el rol admin"}), 403
+    if not puede_gestionar(u_actual["rol"], u_objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permiso para modificar a este usuario"}), 403
+    # Un admin no puede elevar a otro admin ni a superadmin
+    if nuevo_rol == 'superadmin' and u_actual["rol"] != 'superadmin':
+        conn.close()
+        return jsonify({"error": "No autorizado"}), 403
+    conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
     conn.commit()
     conn.close()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "message": "Rol actualizado"})
 
 # Admin: listar documentos de un usuario
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
