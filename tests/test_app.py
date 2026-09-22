@@ -55,6 +55,15 @@ class KakuaaApiTests(unittest.TestCase):
         conn.close()
         return user_id
 
+    def _user_id(self, usuario):
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id FROM usuarios WHERE usuario=?", (usuario,)
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        return row["id"]
+
     def login(self, usuario, password="Test123!"):
         response = self.client.post(
             "/api/login", json={"usuario": usuario, "password": password}
@@ -309,6 +318,57 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(unknown_response.status_code, 200)
         self.assertEqual(known_response.get_json()["message"], unknown_response.get_json()["message"])
         self.assertIsNotNone(known)
+
+    def test_user_listing_respects_role_hierarchy(self):
+        self.add_user("list-admin", "admin")
+        self.add_user("list-operativo", "operativo")
+        self.add_user("list-contrib", "contribuyente")
+
+        super_token = self.verify(self.login("superadmin-test", "Super123!"))
+        super_users = self.client.get("/api/admin/usuarios", headers=self.auth(super_token))
+        self.assertEqual(super_users.status_code, 200)
+        self.assertEqual({u["rol"] for u in super_users.get_json()}, {"superadmin", "admin", "operativo", "contribuyente"})
+
+        admin_token = self.verify(self.login("list-admin"))
+        admin_users = self.client.get("/api/admin/usuarios", headers=self.auth(admin_token))
+        self.assertEqual(admin_users.status_code, 200)
+        self.assertEqual({u["rol"] for u in admin_users.get_json()}, {"operativo", "contribuyente"})
+
+        operativo_token = self.verify(self.login("list-operativo"))
+        operativo_users = self.client.get("/api/admin/usuarios", headers=self.auth(operativo_token))
+        self.assertEqual(operativo_users.status_code, 200)
+        self.assertEqual({u["rol"] for u in operativo_users.get_json()}, {"contribuyente"})
+
+    def test_disabling_user_revokes_existing_session(self):
+        self.add_user("target-disable")
+        self.add_user("admin-disable", "admin")
+        target_token = self.verify(self.login("target-disable"))
+        admin_token = self.verify(self.login("admin-disable"))
+        target_id = self._user_id("target-disable")
+
+        response = self.client.put(
+            f"/api/admin/usuarios/{target_id}/estado",
+            headers=self.auth(admin_token),
+            json={"activo": False},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
+
+        conn = get_db()
+        row = conn.execute("SELECT activo, token_sesion, token_sesion_hash, token_expira_en FROM usuarios WHERE usuario=?", ("target-disable",)).fetchone()
+        conn.close()
+        self.assertEqual(row["activo"], 0)
+        self.assertIsNone(row["token_sesion"])
+        self.assertIsNone(row["token_sesion_hash"])
+        self.assertIsNone(row["token_expira_en"])
+
+        response = self.client.put(
+            f"/api/admin/usuarios/{target_id}/estado",
+            headers=self.auth(admin_token),
+            json={"activo": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
 
     def test_superadmin_cannot_be_disabled(self):
         self.add_user("admin3", "admin")
