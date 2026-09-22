@@ -12,6 +12,7 @@ os.environ["SUPERADMIN_PASSWORD"] = "Super123!"
 os.environ["SUPERADMIN_EMAIL"] = "superadmin@test.local"
 os.environ["COOKIE_SECURE"] = "0"
 os.environ["SESSION_COOKIE_NAME"] = "kakuaa_test_session"
+os.environ["SUPERADMIN_BOOTSTRAP_SECRET"] = "test-bootstrap-secret-" + "x" * 40
 
 from app import app, get_db, hash_password
 
@@ -39,10 +40,11 @@ class KakuaaApiTests(unittest.TestCase):
         conn.execute("DELETE FROM subcarpetas")
         conn.execute("DELETE FROM tickets_recuperacion")
         conn.execute("DELETE FROM usuarios WHERE rol != 'superadmin'")
-        conn.execute("""UPDATE usuarios SET intentos_fallidos=0, bloqueo_hasta=NULL,
+        conn.execute("""UPDATE usuarios SET password_hash=?, intentos_fallidos=0, bloqueo_hasta=NULL,
                         token_sesion=NULL, token_sesion_hash=NULL, csrf_token_hash=NULL, token_expira_en=NULL,
-                        debe_cambiar=0, activo=1
-                        WHERE rol='superadmin'""")
+                        reset_token_hash=NULL, reset_expira_en=NULL, debe_cambiar=0, activo=1
+                        WHERE rol='superadmin'""", (hash_password("Super123!"),))
+        conn.execute("UPDATE superadmin_bootstrap SET usado=0, usado_en=NULL WHERE id=1")
         conn.commit()
         self.__class__.last_email = ()
         self.superadmin_id = conn.execute(
@@ -89,6 +91,45 @@ class KakuaaApiTests(unittest.TestCase):
 
     def auth(self, token):
         return {"X-CSRF-Token": token}
+
+    def test_superadmin_bootstrap_is_one_time_and_invalidates_sessions(self):
+        csrf = self.verify(self.login("superadmin-test", "Super123!"))
+
+        invalid = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={"bootstrap_secret": "wrong-secret", "nueva_password": "NewSuper123!"},
+        )
+        self.assertEqual(invalid.status_code, 403)
+
+        response = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "NewSuper123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(data["accion"], "password_reset")
+        self.assertEqual(data["usuario"], "superadmin-test")
+        self.assertNotIn("bootstrap_secret", data)
+        self.assertNotIn("password", data)
+
+        self.assertEqual(
+            self.client.get("/api/mis-documentos", headers=self.auth(csrf)).status_code,
+            401,
+        )
+        challenge = self.login("superadmin-test", "NewSuper123!")
+        self.assertTrue(challenge)
+
+        used = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "AnotherSuper123!",
+            },
+        )
+        self.assertEqual(used.status_code, 409)
 
     def test_ip_rate_limits_protect_public_auth_endpoints(self):
         for _ in range(10):
@@ -353,13 +394,25 @@ class KakuaaApiTests(unittest.TestCase):
         docs_real = os.path.realpath(os.environ["DOCS_DIR"])
         self.assertEqual(os.path.commonpath([docs_real, os.path.realpath(doc["ruta"])]), docs_real)
 
-        user_a_token = self.verify(self.login("usera"))
-        user_b_token = self.verify(self.login("userb"))
+        user_a_client = app.test_client()
+        user_b_client = app.test_client()
+        challenge = user_a_client.post(
+            "/api/login", json={"usuario": "usera", "password": "Test123!"}
+        ).get_json()["challenge"]
+        user_a_token = user_a_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+        challenge = user_b_client.post(
+            "/api/login", json={"usuario": "userb", "password": "Test123!"}
+        ).get_json()["challenge"]
+        user_b_token = user_b_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
         self.assertEqual(
-            self.client.get("/api/mis-documentos", headers=self.auth(user_a_token)).status_code,
+            user_a_client.get("/api/mis-documentos", headers=self.auth(user_a_token)).status_code,
             200,
         )
-        forbidden = self.client.get(
+        forbidden = user_b_client.get(
             f"/api/mis-documentos/{doc['id']}/descargar",
             headers=self.auth(user_b_token),
         )
@@ -372,7 +425,7 @@ class KakuaaApiTests(unittest.TestCase):
         conn.execute("UPDATE documentos SET ruta=? WHERE id=?", (outside, doc["id"]))
         conn.commit()
         conn.close()
-        blocked = self.client.get(
+        blocked = user_a_client.get(
             f"/api/mis-documentos/{doc['id']}/descargar",
             headers=self.auth(user_a_token),
         )
@@ -458,17 +511,32 @@ class KakuaaApiTests(unittest.TestCase):
     def test_disabling_user_revokes_existing_session(self):
         self.add_user("target-disable")
         self.add_user("admin-disable", "admin")
-        target_token = self.verify(self.login("target-disable"))
-        admin_token = self.verify(self.login("admin-disable"))
+        target_client = app.test_client()
+        admin_client = app.test_client()
+
+        challenge = target_client.post(
+            "/api/login", json={"usuario": "target-disable", "password": "Test123!"}
+        ).get_json()["challenge"]
+        target_token = target_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+
+        challenge = admin_client.post(
+            "/api/login", json={"usuario": "admin-disable", "password": "Test123!"}
+        ).get_json()["challenge"]
+        admin_token = admin_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+
         target_id = self._user_id("target-disable")
 
-        response = self.client.put(
+        response = admin_client.put(
             f"/api/admin/usuarios/{target_id}/estado",
             headers=self.auth(admin_token),
             json={"activo": False},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
+        self.assertEqual(target_client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
 
         conn = get_db()
         row = conn.execute("SELECT activo, token_sesion, token_sesion_hash, token_expira_en FROM usuarios WHERE usuario=?", ("target-disable",)).fetchone()
@@ -478,13 +546,13 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertIsNone(row["token_sesion_hash"])
         self.assertIsNone(row["token_expira_en"])
 
-        response = self.client.put(
+        response = admin_client.put(
             f"/api/admin/usuarios/{target_id}/estado",
             headers=self.auth(admin_token),
             json={"activo": True},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
+        self.assertEqual(target_client.get("/api/mis-documentos", headers=self.auth(target_token)).status_code, 401)
 
     def test_superadmin_cannot_be_disabled(self):
         self.add_user("admin3", "admin")
@@ -570,7 +638,15 @@ class KakuaaApiTests(unittest.TestCase):
     def test_recovery_approval_sends_single_use_reset_link(self):
         self.add_user("recover-approved")
         self.add_user("recovery-admin", "admin")
-        old_token = self.verify(self.login("recover-approved"))
+        recovery_client = app.test_client()
+        admin_client = app.test_client()
+
+        challenge = recovery_client.post(
+            "/api/login", json={"usuario": "recover-approved", "password": "Test123!"}
+        ).get_json()["challenge"]
+        old_token = recovery_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
 
         request_reset = self.client.post("/api/solicitar-reset", json={"ruc": "recover-approved-ruc"})
         self.assertEqual(request_reset.status_code, 200)
@@ -582,15 +658,20 @@ class KakuaaApiTests(unittest.TestCase):
         ).fetchone()
         conn.close()
 
-        admin_token = self.verify(self.login("recovery-admin"))
-        response = self.client.post(
+        challenge = admin_client.post(
+            "/api/login", json={"usuario": "recovery-admin", "password": "Test123!"}
+        ).get_json()["challenge"]
+        admin_token = admin_client.post(
+            "/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"}
+        ).get_json()["csrf_token"]
+        response = admin_client.post(
             f"/api/admin/tickets/{ticket['id']}/aprobar",
             headers=self.auth(admin_token),
         )
         self.assertEqual(response.status_code, 200)
 
         self.assertEqual(
-            self.client.get("/api/mis-documentos", headers=self.auth(old_token)).status_code,
+            recovery_client.get("/api/mis-documentos", headers=self.auth(old_token)).status_code,
             401,
         )
 
