@@ -572,6 +572,40 @@ def rate_limit_response():
 
 # ---------- RUTAS ----------
 
+@app.route("/api/superadmin/storage-diagnostic", methods=["POST"])
+def superadmin_storage_diagnostic():
+    """Diagnóstico temporal y protegido del almacenamiento de producción."""
+    provided = str((request.get_json(silent=True) or {}).get("bootstrap_secret", "")).strip()
+    expected = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
+    if not expected or len(expected) < 32 or not provided or not secrets.compare_digest(
+        provided.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return jsonify({"error": "Credencial inválida."}), 403
+
+    conn = get_db()
+    try:
+        db_exists = os.path.exists(DB_PATH)
+        persistent_exists = os.path.isdir(PERSISTENT_DATA_DIR)
+        superadmins = conn.execute(
+            "SELECT id, usuario, rol, activo, debe_cambiar FROM usuarios WHERE rol = 'superadmin' ORDER BY id"
+        ).fetchall()
+        bootstrap = conn.execute(
+            "SELECT usado, usado_en FROM superadmin_bootstrap WHERE id = 1"
+        ).fetchone()
+        usuarios_total = conn.execute("SELECT COUNT(*) AS total FROM usuarios").fetchone()["total"]
+        return jsonify({
+            "ok": True,
+            "db_path": DB_PATH,
+            "db_exists": db_exists,
+            "persistent_data_dir": PERSISTENT_DATA_DIR,
+            "persistent_dir_exists": persistent_exists,
+            "usuarios_total": usuarios_total,
+            "superadmins": [dict(row) for row in superadmins],
+            "bootstrap": dict(bootstrap) if bootstrap else None,
+        })
+    finally:
+        conn.close()
+
 @app.route("/healthz")
 def healthz():
     return jsonify({"status": "ok"})
