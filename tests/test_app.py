@@ -177,6 +177,65 @@ class KakuaaApiTests(unittest.TestCase):
         )
         self.assertEqual(used.status_code, 409)
 
+
+    def test_superadmin_recovery_resets_existing_account_without_exposing_secret(self):
+        os.environ["SUPERADMIN_RECOVERY_SECRET"] = "test-recovery-secret-" + "x" * 31
+        response = self.client.post(
+            "/api/superadmin/recovery",
+            json={
+                "recovery_secret": os.environ["SUPERADMIN_RECOVERY_SECRET"],
+                "nueva_password": "Recovered123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(data["accion"], "password_reset")
+        self.assertEqual(data["usuario"], "superadmin-test")
+        self.assertNotIn("recovery_secret", data)
+        self.assertNotIn("password", data)
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT rol, activo, usuario FROM usuarios WHERE id=?",
+            (self.superadmin_id,),
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row["rol"], "superadmin")
+        self.assertEqual(row["activo"], 1)
+        self.assertEqual(row["usuario"], "superadmin-test")
+
+        challenge = self.login("superadmin-test", "Recovered123!")
+        self.assertTrue(challenge)
+
+    def test_superadmin_recovery_creates_account_when_missing(self):
+        os.environ["SUPERADMIN_RECOVERY_SECRET"] = "test-recovery-secret-" + "x" * 31
+        conn = get_db()
+        conn.execute("DELETE FROM usuarios WHERE rol='superadmin'")
+        conn.commit()
+        conn.close()
+
+        response = self.client.post(
+            "/api/superadmin/recovery",
+            json={
+                "recovery_secret": os.environ["SUPERADMIN_RECOVERY_SECRET"],
+                "nueva_password": "Created123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["accion"], "superadmin_created")
+        self.assertEqual(response.get_json()["usuario"], "superadmin-test")
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT rol, activo, usuario, correo FROM usuarios WHERE rol='superadmin'"
+        ).fetchone()
+        conn.close()
+        self.assertEqual(row["rol"], "superadmin")
+        self.assertEqual(row["activo"], 1)
+        self.assertEqual(row["usuario"], "superadmin-test")
+        self.assertEqual(row["correo"], "superadmin@test.local")
+        self.assertTrue(self.login("superadmin-test", "Created123!"))
+
     def test_ip_rate_limits_protect_public_auth_endpoints(self):
         for _ in range(10):
             response = self.client.post(
