@@ -264,6 +264,52 @@ def init_db():
         FOREIGN KEY (creado_por) REFERENCES usuarios(id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_facturas_cliente ON facturas_clientes(cliente_id, fecha)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS articulos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT UNIQUE NOT NULL,
+        nombre TEXT NOT NULL,
+        descripcion TEXT DEFAULT '',
+        unidad TEXT NOT NULL DEFAULT 'servicio',
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tarifas_articulos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        articulo_id INTEGER NOT NULL,
+        precio REAL NOT NULL DEFAULT 0,
+        vigencia_desde TEXT NOT NULL,
+        vigencia_hasta TEXT NOT NULL,
+        ajuste_vencimiento REAL NOT NULL DEFAULT 0,
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (articulo_id) REFERENCES articulos(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tarifas_articulo_vigencia ON tarifas_articulos(articulo_id, vigencia_desde, vigencia_hasta)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS costos_persona (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        costo_hora REAL NOT NULL DEFAULT 0,
+        vigencia_desde TEXT NOT NULL,
+        vigencia_hasta TEXT DEFAULT NULL,
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_costos_persona_vigencia ON costos_persona(usuario_id, vigencia_desde, vigencia_hasta)")
+    for col, definition in [
+        ("articulo_id", "INTEGER"),
+        ("tarifa_id", "INTEGER"),
+        ("cantidad", "REAL DEFAULT 1")
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE facturas_clientes ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass
+
     conn.execute("""CREATE TABLE IF NOT EXISTS tareas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cliente_id INTEGER NOT NULL,
@@ -955,6 +1001,186 @@ def rechazar_ticket(ticket_id):
     if t["estado"] != "pendiente":
         conn.close()
 
+# ---------- SUPERADMIN: artículos, tarifas y costos ----------
+def _tarifa_vigente(conn, articulo_id, fecha):
+    return conn.execute("""
+        SELECT * FROM tarifas_articulos
+        WHERE articulo_id = ? AND activo = 1
+          AND vigencia_desde <= ? AND vigencia_hasta >= ?
+        ORDER BY vigencia_desde DESC, id DESC LIMIT 1
+    """, (articulo_id, fecha, fecha)).fetchone()
+
+@app.route("/api/admin/articulos", methods=["GET"])
+@admin_required
+def listar_articulos():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT a.*, 
+               (SELECT COUNT(*) FROM tarifas_articulos t WHERE t.articulo_id=a.id AND t.activo=1) AS tarifas,
+               (SELECT t.precio FROM tarifas_articulos t WHERE t.articulo_id=a.id AND t.activo=1
+                ORDER BY t.vigencia_hasta DESC, t.id DESC LIMIT 1) AS ultima_tarifa
+        FROM articulos a ORDER BY a.activo DESC, a.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/articulos", methods=["POST"])
+@admin_required
+def crear_articulo():
+    data=request.get_json() or {}
+    codigo=str(data.get("codigo","")).strip()
+    nombre=str(data.get("nombre","")).strip()
+    descripcion=str(data.get("descripcion","")).strip()
+    unidad=str(data.get("unidad","servicio")).strip() or "servicio"
+    if not codigo or not nombre:
+        return jsonify({"error":"Código y nombre son obligatorios."}),400
+    conn=get_db()
+    try:
+        cur=conn.execute("INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,descripcion,unidad))
+        conn.commit(); aid=cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.rollback(); conn.close(); return jsonify({"error":"El código del artículo ya existe."}),409
+    conn.close(); return jsonify({"ok":True,"id":aid})
+
+@app.route("/api/admin/articulos/<int:articulo_id>", methods=["PATCH"])
+@admin_required
+def actualizar_articulo(articulo_id):
+    data=request.get_json() or {}; cambios=[]; valores=[]
+    for campo in ("codigo","nombre","descripcion","unidad"):
+        if campo in data:
+            valor=str(data[campo]).strip()
+            if campo in ("codigo","nombre") and not valor:
+                return jsonify({"error":"Código y nombre no pueden quedar vacíos."}),400
+            cambios.append(campo+" = ?"); valores.append(valor)
+    if "activo" in data:
+        cambios.append("activo = ?"); valores.append(1 if data["activo"] else 0)
+    if not cambios: return jsonify({"ok":True})
+    valores.append(articulo_id); conn=get_db()
+    try:
+        conn.execute("UPDATE articulos SET "+", ".join(cambios)+" WHERE id=?",tuple(valores)); conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback(); conn.close(); return jsonify({"error":"El código ya está utilizado."}),409
+    conn.close(); return jsonify({"ok":True})
+
+@app.route("/api/admin/tarifas", methods=["GET"])
+@admin_required
+def listar_tarifas():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT t.*, a.codigo, a.nombre AS articulo_nombre
+        FROM tarifas_articulos t JOIN articulos a ON a.id=t.articulo_id
+        ORDER BY t.vigencia_hasta DESC, a.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/tarifas", methods=["POST"])
+@admin_required
+def crear_tarifa():
+    data=request.get_json() or {}
+    try: articulo_id=int(data.get("articulo_id")); precio=float(data.get("precio"))
+    except (TypeError,ValueError): return jsonify({"error":"Artículo y precio son obligatorios."}),400
+    desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip()
+    try: ajuste=float(data.get("ajuste_vencimiento",0))
+    except (TypeError,ValueError): return jsonify({"error":"El factor de actualización debe ser numérico."}),400
+    if precio < 0 or not desde or not hasta or hasta < desde or ajuste < -100:
+        return jsonify({"error":"Vigencia, precio o factor de actualización inválidos."}),400
+    conn=get_db()
+    if not conn.execute("SELECT id FROM articulos WHERE id=? AND activo=1",(articulo_id,)).fetchone():
+        conn.close(); return jsonify({"error":"Artículo no encontrado o inactivo."}),404
+    cur=conn.execute("""
+        INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
+        VALUES(?,?,?,?,?,?)
+    """,(articulo_id,precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
+    conn.commit(); tid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":tid,"precio_sugerido_siguiente":round(precio*(1+ajuste/100),2)})
+
+@app.route("/api/admin/tarifas/<int:tarifa_id>/renovar", methods=["POST"])
+@admin_required
+def renovar_tarifa(tarifa_id):
+    data=request.get_json() or {}; desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip()
+    conn=get_db(); anterior=conn.execute("SELECT * FROM tarifas_articulos WHERE id=?",(tarifa_id,)).fetchone()
+    if not anterior: conn.close(); return jsonify({"error":"Tarifa no encontrada."}),404
+    try: ajuste=float(data.get("ajuste_vencimiento",anterior["ajuste_vencimiento"] or 0))
+    except (TypeError,ValueError): conn.close(); return jsonify({"error":"Factor inválido."}),400
+    if not desde or not hasta or hasta < desde:
+        conn.close(); return jsonify({"error":"La vigencia es inválida."}),400
+    precio=float(data.get("precio", anterior["precio"]*(1+ajuste/100)))
+    if precio < 0: conn.close(); return jsonify({"error":"Precio inválido."}),400
+    cur=conn.execute("""
+        INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
+        VALUES(?,?,?,?,?,?)
+    """,(anterior["articulo_id"],precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
+    conn.commit(); tid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":tid,"precio":round(precio,2),"precio_anterior":float(anterior["precio"]),"factor":ajuste})
+
+@app.route("/api/admin/tarifas/vencidas", methods=["GET"])
+@admin_required
+def listar_tarifas_vencidas():
+    hoy=datetime.utcnow().strftime("%Y-%m-%d"); conn=get_db()
+    rows=conn.execute("""
+        SELECT t.*,a.codigo,a.nombre AS articulo_nombre,
+               ROUND(t.precio*(1+t.ajuste_vencimiento/100.0),2) AS precio_sugerido
+        FROM tarifas_articulos t JOIN articulos a ON a.id=t.articulo_id
+        WHERE t.activo=1 AND t.vigencia_hasta < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tarifas_articulos n
+            WHERE n.articulo_id=t.articulo_id AND n.activo=1 AND n.vigencia_desde > t.vigencia_hasta
+          )
+        ORDER BY t.vigencia_hasta
+    """,(hoy,)).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/costos-persona", methods=["GET"])
+@admin_required
+def listar_costos_persona():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT c.*,u.nombre,u.usuario,u.rol
+        FROM costos_persona c JOIN usuarios u ON u.id=c.usuario_id
+        WHERE u.rol IN ('admin','operativo')
+        ORDER BY u.nombre COLLATE NOCASE,c.vigencia_desde DESC
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/costos-persona", methods=["POST"])
+@admin_required
+def crear_costo_persona():
+    data=request.get_json() or {}
+    try: usuario_id=int(data.get("usuario_id")); costo=float(data.get("costo_hora"))
+    except (TypeError,ValueError): return jsonify({"error":"Persona y costo/hora son obligatorios."}),400
+    desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip() or None
+    if costo<0 or not desde or (hasta and hasta<desde): return jsonify({"error":"Datos de costo inválidos."}),400
+    conn=get_db()
+    if not _usuario_trabajo_valido(conn,usuario_id):
+        conn.close(); return jsonify({"error":"La persona no es ADMIN/OPERATIVO activo."}),400
+    cur=conn.execute("""
+        INSERT INTO costos_persona(usuario_id,costo_hora,vigencia_desde,vigencia_hasta,creado_por)
+        VALUES(?,?,?,?,?)
+    """,(usuario_id,costo,desde,hasta,obtener_usuario_por_token()["id"]))
+    conn.commit(); cid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":cid})
+
+@app.route("/api/admin/costos-persona/resumen", methods=["GET"])
+@admin_required
+def resumen_costos_persona():
+    hoy=datetime.utcnow().strftime("%Y-%m-%d")
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT u.id,u.nombre,u.rol,
+               COALESCE(SUM((julianday(COALESCE(s.fin,datetime('now')))-julianday(s.inicio))*24.0),0) AS horas,
+               COALESCE((SELECT SUM(
+                    (julianday(COALESCE(s2.fin,datetime('now')))-julianday(s2.inicio))*24.0 *
+                    COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                              WHERE cp.usuario_id=s2.usuario_id AND cp.vigencia_desde <= date(s2.inicio)
+                                AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date(s2.inicio))
+                              ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)
+                ) FROM sesiones_trabajo s2 WHERE s2.usuario_id=u.id),0) AS costo_estimado
+        FROM usuarios u LEFT JOIN sesiones_trabajo s ON s.usuario_id=u.id
+        WHERE u.rol IN ('admin','operativo') GROUP BY u.id,u.nombre,u.rol
+        ORDER BY costo_estimado DESC,u.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
 # ---------- SUPERADMIN: dashboard, facturación, tareas y tracking ----------
 PRIORIDADES_TAREA = {"urgente": 1, "alta": 2, "media": 3, "baja": 4}
 ESTADOS_TAREA = {"pendiente", "en_progreso", "bloqueada", "completada", "cancelada"}
@@ -1022,6 +1248,16 @@ def admin_dashboard():
         SELECT COALESCE(SUM((julianday(COALESCE(fin, datetime('now'))) - julianday(inicio)) * 24.0),0) AS horas
         FROM sesiones_trabajo
     """).fetchone()
+    costo_total = conn.execute("""
+        SELECT COALESCE(SUM(
+            (julianday(COALESCE(s.fin,datetime('now')))-julianday(s.inicio))*24.0 *
+            COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                      WHERE cp.usuario_id=s.usuario_id AND cp.vigencia_desde <= date(s.inicio)
+                        AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date(s.inicio))
+                      ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)
+        ),0) AS costo
+        FROM sesiones_trabajo s
+    """).fetchone()
     por_cliente = conn.execute("""
         SELECT u.id, u.nombre, u.ruc,
                COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas,
@@ -1050,6 +1286,8 @@ def admin_dashboard():
     return jsonify({
         "clientes": dict(clientes),
         "facturacion_total": round(float(facturacion["total"] or 0), 2),
+        "costo_personal_total": round(float(costo_total["costo"] or 0), 2),
+        "margen_estimado": round(float(facturacion["total"] or 0) - float(costo_total["costo"] or 0), 2),
         "horas_totales": round(float(horas["horas"] or 0), 2),
         "tickets": dict(tickets),
         "tareas": dict(tareas),
