@@ -10,8 +10,10 @@ from functools import wraps
 import bcrypt
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_BYTES
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False, expose_headers=["Content-Disposition"])
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +32,9 @@ BLOQUEO_MINUTOS = 30
 OTP_MINUTOS = 1
 MAX_REGENERACIONES_OTP = 5
 SESION_HORAS = 8
+MAX_UPLOAD_MB = 16
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
+MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 # ---------- Base de datos ----------
 def get_db():
@@ -331,7 +336,7 @@ def verificar_otp():
     token_expira = datetime.utcnow() + timedelta(hours=SESION_HORAS)
     conn.execute("UPDATE usuarios SET token_sesion = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (token, token_expira.isoformat(), row["usuario_id"]))
     conn.commit(); conn.close()
-    return jsonify({"ok": True, "token": token, "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
+    return jsonify({"ok": True, "token": token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
 
 @app.route("/api/login/resend-otp", methods=["POST"])
 def reenviar_otp():
@@ -626,6 +631,17 @@ def admin_subir_documento(usuario_id):
     subcarpeta2 = request.form.get("subcarpeta2", "")
     if not archivo or not carpeta:
         return jsonify({"error": "Faltan datos"}), 400
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas:
+        return jsonify({"error": "Carpeta no permitida"}), 400
+    nombre_archivo = secure_filename(archivo.filename or "")
+    if not nombre_archivo:
+        return jsonify({"error": "Nombre de archivo inválido"}), 400
+    extension = nombre_archivo.rsplit(".", 1)[1].lower() if "." in nombre_archivo else ""
+    if extension not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": "Tipo de archivo no permitido"}), 400
+    subcarpeta = secure_filename(subcarpeta) if subcarpeta else ""
+    subcarpeta2 = secure_filename(subcarpeta2) if subcarpeta2 else ""
     dir_usuario = os.path.join(DOCS_DIR, str(usuario_id))
     dir_carpeta = os.path.join(dir_usuario, carpeta)
     if subcarpeta:
@@ -633,7 +649,6 @@ def admin_subir_documento(usuario_id):
     if subcarpeta2:
         dir_carpeta = os.path.join(dir_carpeta, subcarpeta2)
     os.makedirs(dir_carpeta, exist_ok=True)
-    nombre_archivo = archivo.filename
     ruta = os.path.join(dir_carpeta, nombre_archivo)
     archivo.save(ruta)
     conn = get_db()
