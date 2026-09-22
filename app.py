@@ -15,8 +15,8 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "usuarios.db")
-DOCS_DIR = os.path.join(BASE_DIR, "documentos")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "usuarios.db"))
+DOCS_DIR = os.environ.get("DOCS_DIR", os.path.join(BASE_DIR, "documentos"))
 
 MAX_INTENTOS = 5
 BLOQUEO_MINUTOS = 30
