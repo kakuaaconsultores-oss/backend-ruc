@@ -5,6 +5,7 @@ import smtplib
 import secrets
 import hashlib
 import html
+import shutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -19,6 +20,89 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Render usa un filesystem efímero salvo que el servicio tenga un Persistent Disk.
 # En producción configuramos PERSISTENT_DATA_DIR=/var/data; localmente se conserva BASE_DIR.
 PERSISTENT_DATA_DIR = os.environ.get("PERSISTENT_DATA_DIR", BASE_DIR)
+
+
+def _copiar_archivos_faltantes(origen, destino):
+    """Copia solo archivos que todavía no existen en el almacenamiento persistente."""
+    if not os.path.isdir(origen):
+        return
+    os.makedirs(destino, exist_ok=True)
+    for raiz, directorios, archivos in os.walk(origen):
+        relativa = os.path.relpath(raiz, origen)
+        destino_raiz = destino if relativa == "." else os.path.join(destino, relativa)
+        os.makedirs(destino_raiz, exist_ok=True)
+        for nombre in archivos:
+            origen_archivo = os.path.join(raiz, nombre)
+            destino_archivo = os.path.join(destino_raiz, nombre)
+            if not os.path.exists(destino_archivo):
+                shutil.copy2(origen_archivo, destino_archivo)
+
+
+def _migrar_almacenamiento_persistente(base_dir=None, persistent_dir=None):
+    """Migra una instalación existente de /app al Persistent Disk una sola vez.
+
+    Se ejecuta antes de abrir la base principal. La copia SQLite se realiza con
+    sqlite3.backup() para obtener una base consistente y luego se corrigen las
+    rutas absolutas de documentos que antes apuntaban al filesystem efímero.
+    """
+    base_dir = os.path.abspath(base_dir or BASE_DIR)
+    persistent_dir = os.path.abspath(persistent_dir or PERSISTENT_DATA_DIR)
+    if persistent_dir == base_dir:
+        return
+
+    legacy_db = os.path.join(base_dir, "usuarios.db")
+    persistent_db = os.path.join(persistent_dir, "usuarios.db")
+    legacy_docs = os.path.join(base_dir, "documentos")
+    persistent_docs = os.path.join(persistent_dir, "documentos")
+    os.makedirs(persistent_dir, exist_ok=True)
+
+    if not os.path.exists(persistent_db) and os.path.exists(legacy_db):
+        temporal_db = persistent_db + ".migrating"
+        if os.path.exists(temporal_db):
+            os.remove(temporal_db)
+        origen = sqlite3.connect(f"file:{legacy_db}?mode=ro", uri=True)
+        destino = sqlite3.connect(temporal_db)
+        try:
+            origen.backup(destino)
+            integridad = destino.execute("PRAGMA integrity_check").fetchone()[0]
+            if integridad != "ok":
+                raise RuntimeError(f"La copia SQLite no superó integrity_check: {integridad}")
+            destino.commit()
+        finally:
+            destino.close()
+            origen.close()
+        os.replace(temporal_db, persistent_db)
+        print(f"[STORAGE] Base SQLite migrada a {persistent_db}")
+
+    if os.path.isdir(legacy_docs):
+        _copiar_archivos_faltantes(legacy_docs, persistent_docs)
+
+    if os.path.exists(persistent_db):
+        conn = sqlite3.connect(persistent_db)
+        try:
+            docs = conn.execute("SELECT id, ruta FROM documentos WHERE ruta IS NOT NULL").fetchall()
+            legacy_docs_real = os.path.realpath(legacy_docs)
+            persistent_docs_real = os.path.realpath(persistent_docs)
+            for doc_id, ruta in docs:
+                ruta_real = os.path.realpath(str(ruta))
+                if os.path.commonpath([legacy_docs_real, ruta_real]) != legacy_docs_real:
+                    continue
+                relativa = os.path.relpath(ruta_real, legacy_docs_real)
+                nueva_ruta = os.path.join(persistent_docs_real, relativa)
+                if nueva_ruta != ruta:
+                    conn.execute("UPDATE documentos SET ruta = ? WHERE id = ?", (nueva_ruta, doc_id))
+            integridad = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if integridad != "ok":
+                raise RuntimeError(f"El almacenamiento persistente no superó integrity_check: {integridad}")
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"[STORAGE] Almacenamiento persistente listo en {persistent_dir}")
+
+
+_migrar_almacenamiento_persistente()
+
+# DB_PATH/DOCS_DIR explícitos tienen prioridad sobre PERSISTENT_DATA_DIR.
 DB_PATH = os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db"))
 DOCS_DIR = os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR, "documentos"))
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
