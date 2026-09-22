@@ -10,6 +10,7 @@ os.environ["DOCS_DIR"] = os.path.join(TEST_DIR, "documentos")
 os.environ["SUPERADMIN_USUARIO"] = "superadmin-test"
 os.environ["SUPERADMIN_PASSWORD"] = "Super123!"
 os.environ["SUPERADMIN_EMAIL"] = "superadmin@test.local"
+os.environ["COOKIE_SECURE"] = "0"
 
 from app import app, get_db, hash_password
 
