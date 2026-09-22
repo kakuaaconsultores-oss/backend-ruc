@@ -536,8 +536,18 @@ def rechazar_ticket(ticket_id):
 @app.route("/api/admin/usuarios", methods=["GET"])
 @staff_required
 def listar_usuarios():
+    u_actual = obtener_usuario_por_token()
+    roles_visibles = [rol for rol in ROLES if puede_gestionar(u_actual["rol"], rol)]
+    if not roles_visibles:
+        return jsonify([])
+    placeholders = ",".join("?" for _ in roles_visibles)
     conn = get_db()
-    usuarios = conn.execute("SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id").fetchall()
+    usuarios = conn.execute(
+        f"SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios "
+        f"WHERE rol IN ({placeholders}) "
+        "ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id",
+        roles_visibles,
+    ).fetchall()
     conn.close()
     return jsonify([dict(u) for u in usuarios])
 
@@ -654,7 +664,14 @@ def cambiar_estado(usuario_id):
     if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
         conn.close()
         return jsonify({"error": "No tenés permisos para esta operación."}), 403
-    conn.execute("UPDATE usuarios SET activo = ?, token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END WHERE id = ?", (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id))
+    conn.execute(
+        "UPDATE usuarios SET activo = ?, "
+        "token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, "
+        "token_sesion_hash = CASE WHEN ? = 0 THEN NULL ELSE token_sesion_hash END, "
+        "token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END "
+        "WHERE id = ?",
+        (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id),
+    )
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
