@@ -494,7 +494,7 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertTrue(self.last_email)
         cuerpo = self.last_email[2]
         import re
-        match = re.search(r"restablecer-password\\.html\\?token=([^\"<]+)", cuerpo)
+        match = re.search(r"restablecer-password\.html\?token=([^\"<]+)", cuerpo)
         self.assertIsNotNone(match)
         reset_token = match.group(1)
 
