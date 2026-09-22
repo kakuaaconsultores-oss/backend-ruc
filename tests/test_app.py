@@ -134,6 +134,27 @@ class KakuaaApiTests(unittest.TestCase):
             200,
         )
 
+    def test_state_changing_requests_require_csrf(self):
+        self.add_user("csrf-user")
+        csrf = self.verify(self.login("csrf-user"))
+        missing = self.client.post(
+            "/api/cambiar-password",
+            json={"password_actual": "Test123!", "nueva_password": "Changed123!"},
+        )
+        self.assertEqual(missing.status_code, 403)
+        invalid = self.client.post(
+            "/api/cambiar-password",
+            headers={"X-CSRF-Token": "invalid"},
+            json={"password_actual": "Test123!", "nueva_password": "Changed123!"},
+        )
+        self.assertEqual(invalid.status_code, 403)
+        valid = self.client.post(
+            "/api/cambiar-password",
+            headers={"X-CSRF-Token": csrf},
+            json={"password_actual": "Test123!", "nueva_password": "Changed123!"},
+        )
+        self.assertEqual(valid.status_code, 200)
+
     def test_password_lockout_after_five_failures(self):
         self.add_user("locked")
         for attempt in range(1, 6):
