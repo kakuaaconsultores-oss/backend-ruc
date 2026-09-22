@@ -249,6 +249,101 @@ def init_db():
         FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
     )""")
 
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS facturas_clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        numero TEXT NOT NULL,
+        fecha TEXT NOT NULL DEFAULT (date('now')),
+        concepto TEXT NOT NULL,
+        monto REAL NOT NULL DEFAULT 0,
+        estado TEXT NOT NULL DEFAULT 'emitida',
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_facturas_cliente ON facturas_clientes(cliente_id, fecha)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS articulos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT UNIQUE NOT NULL,
+        nombre TEXT NOT NULL,
+        descripcion TEXT DEFAULT '',
+        unidad TEXT NOT NULL DEFAULT 'servicio',
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT DEFAULT (datetime('now'))
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tarifas_articulos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        articulo_id INTEGER NOT NULL,
+        precio REAL NOT NULL DEFAULT 0,
+        vigencia_desde TEXT NOT NULL,
+        vigencia_hasta TEXT NOT NULL,
+        ajuste_vencimiento REAL NOT NULL DEFAULT 0,
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (articulo_id) REFERENCES articulos(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tarifas_articulo_vigencia ON tarifas_articulos(articulo_id, vigencia_desde, vigencia_hasta)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS costos_persona (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        costo_hora REAL NOT NULL DEFAULT 0,
+        vigencia_desde TEXT NOT NULL,
+        vigencia_hasta TEXT DEFAULT NULL,
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_costos_persona_vigencia ON costos_persona(usuario_id, vigencia_desde, vigencia_hasta)")
+    for col, definition in [
+        ("articulo_id", "INTEGER"),
+        ("tarifa_id", "INTEGER"),
+        ("cantidad", "REAL DEFAULT 1")
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE facturas_clientes ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS tareas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        titulo TEXT NOT NULL,
+        descripcion TEXT DEFAULT '',
+        prioridad TEXT NOT NULL DEFAULT 'media',
+        estado TEXT NOT NULL DEFAULT 'pendiente',
+        asignado_id INTEGER,
+        creado_por INTEGER NOT NULL,
+        fecha_limite TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        iniciado_en TEXT DEFAULT NULL,
+        completado_en TEXT DEFAULT NULL,
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (asignado_id) REFERENCES usuarios(id),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_cliente ON tareas(cliente_id, estado)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_asignado ON tareas(asignado_id, estado)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sesiones_trabajo (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tarea_id INTEGER NOT NULL,
+        cliente_id INTEGER NOT NULL,
+        usuario_id INTEGER NOT NULL,
+        inicio TEXT NOT NULL,
+        fin TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (tarea_id) REFERENCES tareas(id),
+        FOREIGN KEY (cliente_id) REFERENCES usuarios(id),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_cliente ON sesiones_trabajo(cliente_id, inicio)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_usuario_activa ON sesiones_trabajo(usuario_id, fin)")
+
     conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
     # El ADMIN histórico 80000000-0 se conserva como ADMIN. La cuenta
     # SUPERADMIN es independiente y solo se crea mediante bootstrap.
@@ -905,3 +1000,965 @@ def rechazar_ticket(ticket_id):
         return jsonify({"error": "Ticket no encontrado"}), 404
     if t["estado"] != "pendiente":
         conn.close()
+        return jsonify({"error": "Este ticket ya fue resuelto"}), 400
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario asociado no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
+    conn.execute("UPDATE tickets_recuperacion SET estado = 'rechazado', resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "message": "Ticket rechazado"})
+
+# Admin: listar usuarios
+@app.route("/api/admin/usuarios", methods=["GET"])
+@staff_required
+def listar_usuarios():
+    u_actual = obtener_usuario_por_token()
+    roles_visibles = [rol for rol in ROLES if puede_gestionar(u_actual["rol"], rol)]
+    if not roles_visibles:
+        return jsonify([])
+    placeholders = ",".join("?" for _ in roles_visibles)
+    conn = get_db()
+    usuarios = conn.execute(
+        f"SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios "
+        f"WHERE rol IN ({placeholders}) "
+        "ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id",
+        roles_visibles,
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(u) for u in usuarios])
+
+# Admin: crear usuario (marca debe_cambiar para forzar cambio en primer ingreso)
+@app.route("/api/admin/usuarios", methods=["POST"])
+@staff_required
+def crear_usuario():
+    data = request.get_json() or {}
+    ruc = data.get("ruc", "").strip()
+    correo = data.get("correo", "").strip()
+    nombre = data.get("nombre", "").strip()
+    usuario_nuevo = data.get("usuario", "").strip() or ruc
+    contrasena = data.get("contrasena", "")
+    rol_nuevo = data.get("rol", "contribuyente").strip()
+    if not ruc or not correo or not nombre or not contrasena or not usuario_nuevo:
+        return jsonify({"error": "Faltan datos"}), 400
+    error_password = validar_politica_password(contrasena)
+    if error_password:
+        return jsonify({"error": error_password}), 400
+    if rol_nuevo not in ("admin", "operativo", "contribuyente"):
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
+    u_actual = obtener_usuario_por_token()
+    if not puede_gestionar(u_actual["rol"], rol_nuevo):
+        return jsonify({"error": "No tenés permisos para crear este rol."}), 403
+    conn = get_db()
+    try:
+        hashed = hash_password(contrasena)
+        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                           (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
+        conn.commit()
+        return jsonify({"ok": True, "id": cur.lastrowid}), 201
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "El RUC o correo ya existe"}), 409
+
+# Admin: editar usuario (invalida token si cambia RUC o desactiva)
+@app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
+@staff_required
+def editar_usuario(usuario_id):
+    data = request.get_json() or {}
+    ruc = data.get("ruc", "").strip()
+    correo = data.get("correo", "").strip()
+    nombre = data.get("nombre", "").strip()
+    conn = get_db()
+    u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not u:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    u_actual = obtener_usuario_por_token()
+    if u["rol"] == "superadmin" or not puede_gestionar(u_actual["rol"], u["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para editar este usuario."}), 403
+    if not ruc or not correo or not nombre:
+        conn.close()
+        return jsonify({"error": "RUC, correo y nombre son obligatorios."}), 400
+    try:
+        conn.execute("UPDATE usuarios SET ruc = ?, correo = ?, nombre = ? WHERE id = ?", (ruc, correo, nombre, usuario_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "El RUC o correo ya existe"}), 409
+
+# La recuperación administrativa usa exclusivamente tickets + enlaces de un solo uso.\n# No se permite establecer ni enviar contraseñas manualmente desde el panel.\n\n# Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
+@app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
+@staff_required
+def cambiar_estado(usuario_id):
+    data = request.get_json() or {}
+    activo = bool(data.get("activo"))
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if objetivo["rol"] == "superadmin":
+        conn.close()
+        return jsonify({"error": "No se puede deshabilitar al SUPERADMIN."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.execute(
+        "UPDATE usuarios SET activo = ?, "
+        "token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, "
+        "token_sesion_hash = CASE WHEN ? = 0 THEN NULL ELSE token_sesion_hash END, "
+        "csrf_token_hash = CASE WHEN ? = 0 THEN NULL ELSE csrf_token_hash END, "
+        "token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END "
+        "WHERE id = ?",
+        (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Admin: asignar rol
+@app.route("/api/admin/usuarios/<int:usuario_id>/rol", methods=["PUT"])
+@staff_required
+def asignar_rol(usuario_id):
+    data = request.get_json() or {}
+    nuevo_rol = data.get("rol", "").strip()
+    if nuevo_rol not in ROLES or nuevo_rol == "superadmin":
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if objetivo["rol"] == "superadmin":
+        conn.close()
+        return jsonify({"error": "El SUPERADMIN es único y no puede ser modificado desde este módulo."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.execute("UPDATE usuarios SET rol = ?, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_rol, usuario_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "message": "Rol actualizado"})
+
+@app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
+@staff_required
+def admin_documentos(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ? ORDER BY subido_en DESC", (usuario_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(d) for d in docs])
+
+# Admin: subir documento
+@app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["POST"])
+@staff_required
+def admin_subir_documento(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.close()
+
+    archivo = request.files.get("archivo")
+    carpeta = request.form.get("carpeta", "")
+    subcarpeta = request.form.get("subcarpeta", "")
+    subcarpeta2 = request.form.get("subcarpeta2", "")
+    if not archivo or not carpeta:
+        return jsonify({"error": "Faltan datos"}), 400
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas:
+        return jsonify({"error": "Carpeta no permitida"}), 400
+    nombre_archivo = secure_filename(archivo.filename or "")
+    if not nombre_archivo:
+        return jsonify({"error": "Nombre de archivo inválido"}), 400
+    extension = nombre_archivo.rsplit(".", 1)[1].lower() if "." in nombre_archivo else ""
+    if extension not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": "Tipo de archivo no permitido"}), 400
+    subcarpeta = secure_filename(subcarpeta) if subcarpeta else ""
+    subcarpeta2 = secure_filename(subcarpeta2) if subcarpeta2 else ""
+    try:
+        dir_usuario = ruta_segura(DOCS_DIR, str(usuario_id))
+        dir_carpeta = ruta_segura(dir_usuario, carpeta)
+        if subcarpeta:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta)
+        if subcarpeta2:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta2)
+        ruta = ruta_segura(dir_carpeta, nombre_archivo)
+    except ValueError:
+        return jsonify({"error": "Ruta de archivo inválida"}), 400
+    os.makedirs(dir_carpeta, exist_ok=True)
+    archivo.save(ruta)
+    conn = get_db()
+    cur = conn.execute("INSERT INTO documentos (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2) VALUES (?, ?, ?, ?, ?, ?)",
+                       (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "id": cur.lastrowid}), 201
+
+# Admin: eliminar documento
+@app.route("/api/admin/documentos/<int:doc_id>", methods=["DELETE"])
+@staff_required
+def admin_eliminar_documento(doc_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    d = conn.execute("SELECT * FROM documentos WHERE id = ?", (doc_id,)).fetchone()
+    if not d:
+        conn.close()
+        return jsonify({"error": "Documento no encontrado"}), 404
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (d["usuario_id"],)).fetchone()
+    if not objetivo or not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real:
+            conn.close()
+            return jsonify({"error": "Ruta de documento inválida"}), 400
+        if os.path.exists(ruta):
+            if not os.path.isfile(ruta):
+                conn.close()
+                return jsonify({"error": "Documento no disponible"}), 404
+            os.remove(ruta)
+    except ValueError:
+        conn.close()
+        return jsonify({"error": "Ruta de documento inválida"}), 400
+    conn.execute("DELETE FROM documentos WHERE id = ?", (doc_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Admin: subcarpetas de un usuario
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["GET"])
+@staff_required
+def admin_subcarpetas(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    subs = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ?", (usuario_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(s) for s in subs])
+
+# Admin: crear subcarpeta
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["POST"])
+@staff_required
+def admin_crear_subcarpeta(usuario_id):
+    data = request.get_json() or {}
+    carpeta = data.get("carpeta", "")
+    nombre = secure_filename(data.get("nombre", "").strip())
+    padre = secure_filename(data.get("padre", "").strip()) if data.get("padre") else ""
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas or not nombre:
+        return jsonify({"error": "Datos de subcarpeta inválidos"}), 400
+    conn = get_db()
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    if padre:
+        parent = conn.execute(
+            "SELECT id FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ?",
+            (usuario_id, carpeta, padre)
+        ).fetchone()
+        if not parent:
+            conn.close()
+            return jsonify({"error": "Subcarpeta padre no encontrada"}), 404
+    existe = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ? AND padre = ?",
+                          (usuario_id, carpeta, nombre, padre)).fetchone()
+    if existe:
+        conn.close()
+        return jsonify({"error": "Esa subcarpeta ya existe"}), 409
+    conn.execute("INSERT INTO subcarpetas (usuario_id, carpeta, nombre, padre) VALUES (?, ?, ?, ?)",
+                 (usuario_id, carpeta, nombre, padre))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True}), 201
+
+# Admin: eliminar subcarpeta
+@app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas/<path:nombre>", methods=["DELETE"])
+@staff_required
+def admin_eliminar_subcarpeta(usuario_id, nombre):
+    u_actual = obtener_usuario_por_token()
+    nombre = secure_filename(nombre)
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    s = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND nombre = ?", (usuario_id, nombre)).fetchone()
+    if not s:
+        conn.close()
+        return jsonify({"error": "Subcarpeta no encontrada"}), 404
+    conn.execute("DELETE FROM subcarpetas WHERE usuario_id = ? AND padre = ?", (usuario_id, nombre))
+    conn.execute("DELETE FROM documentos WHERE usuario_id = ? AND subcarpeta = ?", (usuario_id, nombre))
+    conn.execute("DELETE FROM subcarpetas WHERE id = ?", (s["id"],))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Contribuyente: sus documentos
+@app.route("/api/mis-documentos", methods=["GET"])
+@usuario_required
+def mis_documentos():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ?", (u["id"],)).fetchall()
+    conn.close()
+    return jsonify([dict(d) for d in docs])
+
+# Contribuyente: descargar documento
+@app.route("/api/mis-documentos/<int:doc_id>/descargar", methods=["GET"])
+@usuario_required
+def descargar_documento(doc_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    d = conn.execute("SELECT * FROM documentos WHERE id = ? AND usuario_id = ?", (doc_id, u["id"])).fetchone()
+    conn.close()
+    if not d:
+        return jsonify({"error": "No autorizado"}), 403
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real or not os.path.isfile(ruta):
+            return jsonify({"error": "Documento no disponible"}), 404
+    except ValueError:
+        return jsonify({"error": "Ruta de documento inválida"}), 400
+    return send_from_directory(os.path.dirname(ruta), os.path.basename(ruta), as_attachment=True)
+
+
+# ---------- SUPERADMIN: artículos, tarifas y costos ----------
+def _tarifa_vigente(conn, articulo_id, fecha):
+    return conn.execute("""
+        SELECT * FROM tarifas_articulos
+        WHERE articulo_id = ? AND activo = 1
+          AND vigencia_desde <= ? AND vigencia_hasta >= ?
+        ORDER BY vigencia_desde DESC, id DESC LIMIT 1
+    """, (articulo_id, fecha, fecha)).fetchone()
+
+@app.route("/api/admin/articulos", methods=["GET"])
+@admin_required
+def listar_articulos():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT a.*, 
+               (SELECT COUNT(*) FROM tarifas_articulos t WHERE t.articulo_id=a.id AND t.activo=1) AS tarifas,
+               (SELECT t.precio FROM tarifas_articulos t WHERE t.articulo_id=a.id AND t.activo=1
+                ORDER BY t.vigencia_hasta DESC, t.id DESC LIMIT 1) AS ultima_tarifa
+        FROM articulos a ORDER BY a.activo DESC, a.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/articulos", methods=["POST"])
+@admin_required
+def crear_articulo():
+    data=request.get_json() or {}
+    codigo=str(data.get("codigo","")).strip()
+    nombre=str(data.get("nombre","")).strip()
+    descripcion=str(data.get("descripcion","")).strip()
+    unidad=str(data.get("unidad","servicio")).strip() or "servicio"
+    if not codigo or not nombre:
+        return jsonify({"error":"Código y nombre son obligatorios."}),400
+    conn=get_db()
+    try:
+        cur=conn.execute("INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,descripcion,unidad))
+        conn.commit(); aid=cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.rollback(); conn.close(); return jsonify({"error":"El código del artículo ya existe."}),409
+    conn.close(); return jsonify({"ok":True,"id":aid})
+
+@app.route("/api/admin/articulos/<int:articulo_id>", methods=["PATCH"])
+@admin_required
+def actualizar_articulo(articulo_id):
+    data=request.get_json() or {}; cambios=[]; valores=[]
+    for campo in ("codigo","nombre","descripcion","unidad"):
+        if campo in data:
+            valor=str(data[campo]).strip()
+            if campo in ("codigo","nombre") and not valor:
+                return jsonify({"error":"Código y nombre no pueden quedar vacíos."}),400
+            cambios.append(campo+" = ?"); valores.append(valor)
+    if "activo" in data:
+        cambios.append("activo = ?"); valores.append(1 if data["activo"] else 0)
+    if not cambios: return jsonify({"ok":True})
+    valores.append(articulo_id); conn=get_db()
+    try:
+        conn.execute("UPDATE articulos SET "+", ".join(cambios)+" WHERE id=?",tuple(valores)); conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback(); conn.close(); return jsonify({"error":"El código ya está utilizado."}),409
+    conn.close(); return jsonify({"ok":True})
+
+@app.route("/api/admin/tarifas", methods=["GET"])
+@admin_required
+def listar_tarifas():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT t.*, a.codigo, a.nombre AS articulo_nombre
+        FROM tarifas_articulos t JOIN articulos a ON a.id=t.articulo_id
+        ORDER BY t.vigencia_hasta DESC, a.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/tarifas", methods=["POST"])
+@admin_required
+def crear_tarifa():
+    data=request.get_json() or {}
+    try: articulo_id=int(data.get("articulo_id")); precio=float(data.get("precio"))
+    except (TypeError,ValueError): return jsonify({"error":"Artículo y precio son obligatorios."}),400
+    desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip()
+    try: ajuste=float(data.get("ajuste_vencimiento",0))
+    except (TypeError,ValueError): return jsonify({"error":"El factor de actualización debe ser numérico."}),400
+    if precio < 0 or not desde or not hasta or hasta < desde or ajuste < -100:
+        return jsonify({"error":"Vigencia, precio o factor de actualización inválidos."}),400
+    conn=get_db()
+    if not conn.execute("SELECT id FROM articulos WHERE id=? AND activo=1",(articulo_id,)).fetchone():
+        conn.close(); return jsonify({"error":"Artículo no encontrado o inactivo."}),404
+    cur=conn.execute("""
+        INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
+        VALUES(?,?,?,?,?,?)
+    """,(articulo_id,precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
+    conn.commit(); tid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":tid,"precio_sugerido_siguiente":round(precio*(1+ajuste/100),2)})
+
+@app.route("/api/admin/tarifas/<int:tarifa_id>/renovar", methods=["POST"])
+@admin_required
+def renovar_tarifa(tarifa_id):
+    data=request.get_json() or {}; desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip()
+    conn=get_db(); anterior=conn.execute("SELECT * FROM tarifas_articulos WHERE id=?",(tarifa_id,)).fetchone()
+    if not anterior: conn.close(); return jsonify({"error":"Tarifa no encontrada."}),404
+    try: ajuste=float(data.get("ajuste_vencimiento",anterior["ajuste_vencimiento"] or 0))
+    except (TypeError,ValueError): conn.close(); return jsonify({"error":"Factor inválido."}),400
+    if not desde or not hasta or hasta < desde:
+        conn.close(); return jsonify({"error":"La vigencia es inválida."}),400
+    precio=float(data.get("precio", anterior["precio"]*(1+ajuste/100)))
+    if precio < 0: conn.close(); return jsonify({"error":"Precio inválido."}),400
+    cur=conn.execute("""
+        INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
+        VALUES(?,?,?,?,?,?)
+    """,(anterior["articulo_id"],precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
+    conn.commit(); tid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":tid,"precio":round(precio,2),"precio_anterior":float(anterior["precio"]),"factor":ajuste})
+
+@app.route("/api/admin/tarifas/vencidas", methods=["GET"])
+@admin_required
+def listar_tarifas_vencidas():
+    hoy=datetime.utcnow().strftime("%Y-%m-%d"); conn=get_db()
+    rows=conn.execute("""
+        SELECT t.*,a.codigo,a.nombre AS articulo_nombre,
+               ROUND(t.precio*(1+t.ajuste_vencimiento/100.0),2) AS precio_sugerido
+        FROM tarifas_articulos t JOIN articulos a ON a.id=t.articulo_id
+        WHERE t.activo=1 AND t.vigencia_hasta < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tarifas_articulos n
+            WHERE n.articulo_id=t.articulo_id AND n.activo=1 AND n.vigencia_desde > t.vigencia_hasta
+          )
+        ORDER BY t.vigencia_hasta
+    """,(hoy,)).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/costos-persona", methods=["GET"])
+@admin_required
+def listar_costos_persona():
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT c.*,u.nombre,u.usuario,u.rol
+        FROM costos_persona c JOIN usuarios u ON u.id=c.usuario_id
+        WHERE u.rol IN ('admin','operativo')
+        ORDER BY u.nombre COLLATE NOCASE,c.vigencia_desde DESC
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+@app.route("/api/admin/costos-persona", methods=["POST"])
+@admin_required
+def crear_costo_persona():
+    data=request.get_json() or {}
+    try: usuario_id=int(data.get("usuario_id")); costo=float(data.get("costo_hora"))
+    except (TypeError,ValueError): return jsonify({"error":"Persona y costo/hora son obligatorios."}),400
+    desde=str(data.get("vigencia_desde","")).strip(); hasta=str(data.get("vigencia_hasta","")).strip() or None
+    if costo<0 or not desde or (hasta and hasta<desde): return jsonify({"error":"Datos de costo inválidos."}),400
+    conn=get_db()
+    if not _usuario_trabajo_valido(conn,usuario_id):
+        conn.close(); return jsonify({"error":"La persona no es ADMIN/OPERATIVO activo."}),400
+    cur=conn.execute("""
+        INSERT INTO costos_persona(usuario_id,costo_hora,vigencia_desde,vigencia_hasta,creado_por)
+        VALUES(?,?,?,?,?)
+    """,(usuario_id,costo,desde,hasta,obtener_usuario_por_token()["id"]))
+    conn.commit(); cid=cur.lastrowid; conn.close()
+    return jsonify({"ok":True,"id":cid})
+
+@app.route("/api/admin/costos-persona/resumen", methods=["GET"])
+@admin_required
+def resumen_costos_persona():
+    hoy=datetime.utcnow().strftime("%Y-%m-%d")
+    conn=get_db()
+    rows=conn.execute("""
+        SELECT u.id,u.nombre,u.rol,
+               COALESCE(SUM((julianday(COALESCE(s.fin,datetime('now')))-julianday(s.inicio))*24.0),0) AS horas,
+               COALESCE((SELECT SUM(
+                    (julianday(COALESCE(s2.fin,datetime('now')))-julianday(s2.inicio))*24.0 *
+                    COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                              WHERE cp.usuario_id=s2.usuario_id AND cp.vigencia_desde <= date(s2.inicio)
+                                AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date(s2.inicio))
+                              ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)
+                ) FROM sesiones_trabajo s2 WHERE s2.usuario_id=u.id),0) AS costo_estimado
+        FROM usuarios u LEFT JOIN sesiones_trabajo s ON s.usuario_id=u.id
+        WHERE u.rol IN ('admin','operativo') GROUP BY u.id,u.nombre,u.rol
+        ORDER BY costo_estimado DESC,u.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close(); return jsonify([dict(r) for r in rows])
+
+# ---------- SUPERADMIN: dashboard, facturación, tareas y tracking ----------
+PRIORIDADES_TAREA = {"urgente": 1, "alta": 2, "media": 3, "baja": 4}
+ESTADOS_TAREA = {"pendiente", "en_progreso", "bloqueada", "completada", "cancelada"}
+ESTADOS_FACTURA = {"emitida", "cobrada", "anulada"}
+
+def _cliente_valido(conn, cliente_id):
+    return conn.execute(
+        "SELECT * FROM usuarios WHERE id = ? AND rol = 'contribuyente'",
+        (cliente_id,),
+    ).fetchone()
+
+def _usuario_trabajo_valido(conn, usuario_id):
+    return conn.execute(
+        "SELECT * FROM usuarios WHERE id = ? AND rol IN ('admin','operativo') AND activo = 1",
+        (usuario_id,),
+    ).fetchone()
+
+def _cerrar_sesion_activa(conn, usuario_id, fin=None):
+    fin = fin or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE sesiones_trabajo SET fin = ? WHERE usuario_id = ? AND fin IS NULL",
+        (fin, usuario_id),
+    )
+
+def _detener_tarea_si_corresponde(conn, tarea_id, usuario_id=None):
+    query = "SELECT * FROM sesiones_trabajo WHERE tarea_id = ? AND fin IS NULL"
+    params = [tarea_id]
+    if usuario_id is not None:
+        query += " AND usuario_id = ?"
+        params.append(usuario_id)
+    sesiones = conn.execute(query, tuple(params)).fetchall()
+    ahora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    for sesion in sesiones:
+        conn.execute("UPDATE sesiones_trabajo SET fin = ? WHERE id = ?", (ahora, sesion["id"]))
+
+@app.route("/api/admin/dashboard", methods=["GET"])
+@admin_required
+def admin_dashboard():
+    conn = get_db()
+    clientes = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN activo = 1 THEN 1 ELSE 0 END),0) AS activos
+        FROM usuarios WHERE rol = 'contribuyente'
+    """).fetchone()
+    facturacion = conn.execute("""
+        SELECT COALESCE(SUM(monto),0) AS total
+        FROM facturas_clientes
+        WHERE estado <> 'anulada'
+    """).fetchone()
+    tickets = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END),0) AS pendientes,
+               COALESCE(SUM(CASE WHEN estado IN ('aprobado','rechazado') THEN 1 ELSE 0 END),0) AS resueltos
+        FROM tickets_recuperacion
+    """).fetchone()
+    tareas = conn.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END),0) AS pendientes,
+               COALESCE(SUM(CASE WHEN estado = 'en_progreso' THEN 1 ELSE 0 END),0) AS en_progreso,
+               COALESCE(SUM(CASE WHEN estado = 'completada' THEN 1 ELSE 0 END),0) AS completadas,
+               COALESCE(SUM(CASE WHEN estado = 'bloqueada' THEN 1 ELSE 0 END),0) AS bloqueadas
+        FROM tareas
+    """).fetchone()
+    horas = conn.execute("""
+        SELECT COALESCE(SUM((julianday(COALESCE(fin, datetime('now'))) - julianday(inicio)) * 24.0),0) AS horas
+        FROM sesiones_trabajo
+    """).fetchone()
+    costo_total = conn.execute("""
+        SELECT COALESCE(SUM(
+            (julianday(COALESCE(s.fin,datetime('now')))-julianday(s.inicio))*24.0 *
+            COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                      WHERE cp.usuario_id=s.usuario_id AND cp.vigencia_desde <= date(s.inicio)
+                        AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date(s.inicio))
+                      ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)
+        ),0) AS costo
+        FROM sesiones_trabajo s
+    """).fetchone()
+    por_cliente = conn.execute("""
+        SELECT u.id, u.nombre, u.ruc,
+               COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas,
+               COALESCE((SELECT SUM(f.monto) FROM facturas_clientes f
+                         WHERE f.cliente_id = u.id AND f.estado <> 'anulada'),0) AS facturacion,
+               COALESCE((SELECT COUNT(*) FROM tareas t WHERE t.cliente_id = u.id),0) AS tareas
+        FROM usuarios u
+        LEFT JOIN sesiones_trabajo s ON s.cliente_id = u.id
+        WHERE u.rol = 'contribuyente'
+        GROUP BY u.id, u.nombre, u.ruc
+        ORDER BY horas DESC, u.nombre COLLATE NOCASE
+    """).fetchall()
+    ultimas_tareas = conn.execute("""
+        SELECT t.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc,
+               a.nombre AS asignado_nombre
+        FROM tareas t
+        JOIN usuarios c ON c.id = t.cliente_id
+        LEFT JOIN usuarios a ON a.id = t.asignado_id
+        ORDER BY CASE t.prioridad
+            WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+            CASE t.estado WHEN 'completada' THEN 3 WHEN 'cancelada' THEN 4 ELSE 1 END,
+            t.creado_en DESC
+        LIMIT 12
+    """).fetchall()
+    conn.close()
+    return jsonify({
+        "clientes": dict(clientes),
+        "facturacion_total": round(float(facturacion["total"] or 0), 2),
+        "costo_personal_total": round(float(costo_total["costo"] or 0), 2),
+        "margen_estimado": round(float(facturacion["total"] or 0) - float(costo_total["costo"] or 0), 2),
+        "horas_totales": round(float(horas["horas"] or 0), 2),
+        "tickets": dict(tickets),
+        "tareas": dict(tareas),
+        "por_cliente": [dict(r) for r in por_cliente],
+        "ultimas_tareas": [dict(r) for r in ultimas_tareas],
+    })
+
+@app.route("/api/admin/clientes", methods=["GET"])
+@staff_required
+def listar_clientes_operativos():
+    conn = get_db()
+    clientes = conn.execute("""
+        SELECT id, ruc, correo, nombre, activo, creado_en
+        FROM usuarios WHERE rol = 'contribuyente'
+        ORDER BY activo DESC, nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(c) for c in clientes])
+
+@app.route("/api/admin/facturacion", methods=["GET"])
+@admin_required
+def listar_facturacion():
+    conn = get_db()
+    facturas = conn.execute("""
+        SELECT f.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc
+        FROM facturas_clientes f
+        JOIN usuarios c ON c.id = f.cliente_id
+        ORDER BY f.fecha DESC, f.id DESC
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in facturas])
+
+@app.route("/api/admin/facturacion", methods=["POST"])
+@admin_required
+def crear_factura_cliente():
+    data = request.get_json() or {}
+    try:
+        cliente_id = int(data.get("cliente_id"))
+        monto = float(data.get("monto"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Cliente y monto son obligatorios."}), 400
+    numero = str(data.get("numero", "")).strip()
+    concepto = str(data.get("concepto", "")).strip()
+    fecha = str(data.get("fecha", "")).strip() or datetime.utcnow().strftime("%Y-%m-%d")
+    estado = str(data.get("estado", "emitida")).strip().lower()
+    articulo_raw = data.get("articulo_id")
+    cantidad_raw = data.get("cantidad", 1)
+    articulo_id = None
+    try:
+        cantidad = float(cantidad_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Cantidad inválida."}), 400
+    if articulo_raw not in (None, "", 0, "0"):
+        try: articulo_id = int(articulo_raw)
+        except (TypeError, ValueError): return jsonify({"error": "Artículo inválido."}), 400
+    if not numero or not concepto or monto < 0 or cantidad <= 0 or estado not in ESTADOS_FACTURA:
+        return jsonify({"error": "Datos de facturación inválidos."}), 400
+    conn = get_db()
+    if articulo_id is not None:
+        articulo = conn.execute("SELECT * FROM articulos WHERE id = ? AND activo = 1", (articulo_id,)).fetchone()
+        if not articulo:
+            conn.close(); return jsonify({"error": "Artículo no encontrado o inactivo."}), 404
+        tarifa = _tarifa_vigente(conn, articulo_id, fecha)
+        if not tarifa:
+            conn.close(); return jsonify({"error": "El artículo no tiene una tarifa vigente para esa fecha. Debés actualizar la tarifa antes de facturar."}), 409
+        monto_esperado = round(float(tarifa["precio"]) * cantidad, 2)
+        if abs(monto - monto_esperado) > 0.01:
+            conn.close(); return jsonify({"error": "El monto no coincide con la tarifa vigente.", "monto_esperado": monto_esperado, "tarifa_id": tarifa["id"]}), 409
+        tarifa_id = tarifa["id"]
+    else:
+        tarifa_id = None
+    if not _cliente_valido(conn, cliente_id):
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado."}), 404
+    try:
+        cur = conn.execute("""
+            INSERT INTO facturas_clientes
+            (cliente_id, numero, fecha, concepto, monto, estado, creado_por, articulo_id, tarifa_id, cantidad)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"], articulo_id, tarifa_id, cantidad))
+        conn.commit()
+        factura_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "No se pudo registrar la factura."}), 409
+    conn.close()
+    return jsonify({"ok": True, "id": factura_id})
+
+@app.route("/api/admin/tareas", methods=["GET"])
+@staff_required
+def listar_tareas():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    sql = """
+        SELECT t.*, c.nombre AS cliente_nombre, c.ruc AS cliente_ruc,
+               a.nombre AS asignado_nombre, a.rol AS asignado_rol
+        FROM tareas t
+        JOIN usuarios c ON c.id = t.cliente_id
+        LEFT JOIN usuarios a ON a.id = t.asignado_id
+    """
+    params = []
+    if u["rol"] == "operativo":
+        sql += " WHERE t.asignado_id = ?"
+        params.append(u["id"])
+    sql += """ ORDER BY CASE t.estado WHEN 'completada' THEN 4 WHEN 'cancelada' THEN 5 ELSE 1 END,
+               CASE t.prioridad WHEN 'urgente' THEN 1 WHEN 'alta' THEN 2 WHEN 'media' THEN 3 ELSE 4 END,
+               t.fecha_limite IS NULL, t.fecha_limite, t.creado_en DESC"""
+    tareas = conn.execute(sql, tuple(params)).fetchall()
+    conn.close()
+    return jsonify([dict(t) for t in tareas])
+
+@app.route("/api/admin/tareas", methods=["POST"])
+@admin_required
+def crear_tarea():
+    data = request.get_json() or {}
+    try:
+        cliente_id = int(data.get("cliente_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Seleccioná un cliente."}), 400
+    titulo = str(data.get("titulo", "")).strip()
+    descripcion = str(data.get("descripcion", "")).strip()
+    prioridad = str(data.get("prioridad", "media")).strip().lower()
+    fecha_limite = str(data.get("fecha_limite", "")).strip() or None
+    asignado_raw = data.get("asignado_id")
+    asignado_id = None
+    if asignado_raw not in (None, "", 0, "0"):
+        try:
+            asignado_id = int(asignado_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Responsable inválido."}), 400
+    if not titulo or prioridad not in PRIORIDADES_TAREA:
+        return jsonify({"error": "Título y prioridad son obligatorios."}), 400
+    conn = get_db()
+    actual = obtener_usuario_por_token()
+    if not _cliente_valido(conn, cliente_id):
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado."}), 404
+    if asignado_id is not None:
+        asignado = _usuario_trabajo_valido(conn, asignado_id)
+        if not asignado or not puede_gestionar(actual["rol"], asignado["rol"]):
+            conn.close()
+            return jsonify({"error": "No tenés permisos para designar esa tarea."}), 403
+    cur = conn.execute("""
+        INSERT INTO tareas
+        (cliente_id, titulo, descripcion, prioridad, asignado_id, creado_por, fecha_limite)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (cliente_id, titulo, descripcion, prioridad, asignado_id, actual["id"], fecha_limite))
+    conn.commit()
+    tarea_id = cur.lastrowid
+    conn.close()
+    return jsonify({"ok": True, "id": tarea_id})
+
+@app.route("/api/admin/tareas/<int:tarea_id>", methods=["PATCH"])
+@admin_required
+def actualizar_tarea(tarea_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    actual = obtener_usuario_por_token()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close()
+        return jsonify({"error": "Tarea no encontrada."}), 404
+    cambios = []
+    valores = []
+    if "prioridad" in data:
+        prioridad = str(data["prioridad"]).strip().lower()
+        if prioridad not in PRIORIDADES_TAREA:
+            conn.close()
+            return jsonify({"error": "Prioridad inválida."}), 400
+        cambios.append("prioridad = ?"); valores.append(prioridad)
+    if "estado" in data:
+        estado = str(data["estado"]).strip().lower()
+        if estado not in ESTADOS_TAREA:
+            conn.close()
+            return jsonify({"error": "Estado inválido."}), 400
+        cambios.append("estado = ?"); valores.append(estado)
+        if estado == "en_progreso" and not tarea["iniciado_en"]:
+            cambios.append("iniciado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+        if estado == "completada":
+            cambios.append("completado_en = ?"); valores.append(datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+            _detener_tarea_si_corresponde(conn, tarea_id)
+    if "asignado_id" in data:
+        asignado_id = data["asignado_id"]
+        if asignado_id in (None, "", 0, "0"):
+            asignado_id = None
+        else:
+            try: asignado_id = int(asignado_id)
+            except (TypeError, ValueError):
+                conn.close()
+                return jsonify({"error": "Responsable inválido."}), 400
+            asignado = _usuario_trabajo_valido(conn, asignado_id)
+            if not asignado or not puede_gestionar(actual["rol"], asignado["rol"]):
+                conn.close()
+                return jsonify({"error": "No tenés permisos para designar esa tarea."}), 403
+        cambios.append("asignado_id = ?"); valores.append(asignado_id)
+    if "fecha_limite" in data:
+        cambios.append("fecha_limite = ?"); valores.append(str(data["fecha_limite"]).strip() or None)
+    if "titulo" in data:
+        titulo = str(data["titulo"]).strip()
+        if not titulo:
+            conn.close(); return jsonify({"error": "El título no puede quedar vacío."}), 400
+        cambios.append("titulo = ?"); valores.append(titulo)
+    if "descripcion" in data:
+        cambios.append("descripcion = ?"); valores.append(str(data["descripcion"]).strip())
+    if not cambios:
+        conn.close()
+        return jsonify({"ok": True})
+    valores.append(tarea_id)
+    conn.execute("UPDATE tareas SET " + ", ".join(cambios) + " WHERE id = ?", tuple(valores))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/tareas/<int:tarea_id>/iniciar", methods=["POST"])
+@staff_required
+def iniciar_tarea(tarea_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close(); return jsonify({"error": "Tarea no encontrada."}), 404
+    if u["rol"] == "operativo" and tarea["asignado_id"] != u["id"]:
+        conn.close(); return jsonify({"error": "Esta tarea no está asignada a vos."}), 403
+    if tarea["estado"] in ("completada", "cancelada"):
+        conn.close(); return jsonify({"error": "La tarea ya no puede iniciarse."}), 400
+    _cerrar_sesion_activa(conn, u["id"])
+    ahora = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE tareas SET estado = 'en_progreso', iniciado_en = COALESCE(iniciado_en, ?) WHERE id = ?", (ahora, tarea_id))
+    conn.execute("""
+        INSERT INTO sesiones_trabajo (tarea_id, cliente_id, usuario_id, inicio)
+        VALUES (?, ?, ?, ?)
+    """, (tarea_id, tarea["cliente_id"], u["id"], ahora))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "inicio": ahora, "tarea_id": tarea_id})
+
+@app.route("/api/admin/tareas/<int:tarea_id>/detener", methods=["POST"])
+@staff_required
+def detener_tarea(tarea_id):
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    tarea = conn.execute("SELECT * FROM tareas WHERE id = ?", (tarea_id,)).fetchone()
+    if not tarea:
+        conn.close(); return jsonify({"error": "Tarea no encontrada."}), 404
+    if u["rol"] == "operativo" and tarea["asignado_id"] != u["id"]:
+        conn.close(); return jsonify({"error": "Esta tarea no está asignada a vos."}), 403
+    sesion = conn.execute("""
+        SELECT * FROM sesiones_trabajo
+        WHERE tarea_id = ? AND usuario_id = ? AND fin IS NULL
+        ORDER BY id DESC LIMIT 1
+    """, (tarea_id, u["id"])).fetchone()
+    if not sesion:
+        conn.close(); return jsonify({"error": "No hay un cronómetro activo para esta tarea."}), 400
+    fin = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("UPDATE sesiones_trabajo SET fin = ? WHERE id = ?", (fin, sesion["id"]))
+    conn.execute("UPDATE tareas SET estado = CASE WHEN estado = 'en_progreso' THEN 'pendiente' ELSE estado END WHERE id = ?", (tarea_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "fin": fin})
+
+@app.route("/api/admin/tiempo/activo", methods=["GET"])
+@staff_required
+def tiempo_activo():
+    u = obtener_usuario_por_token()
+    conn = get_db()
+    sesion = conn.execute("""
+        SELECT s.*, t.titulo, c.nombre AS cliente_nombre
+        FROM sesiones_trabajo s
+        JOIN tareas t ON t.id = s.tarea_id
+        JOIN usuarios c ON c.id = s.cliente_id
+        WHERE s.usuario_id = ? AND s.fin IS NULL
+        ORDER BY s.id DESC LIMIT 1
+    """, (u["id"],)).fetchone()
+    conn.close()
+    return jsonify(dict(sesion) if sesion else None)
+
+@app.route("/api/admin/tiempo/resumen", methods=["GET"])
+@admin_required
+def resumen_tiempo():
+    conn = get_db()
+    filas = conn.execute("""
+        SELECT u.id, u.nombre, u.ruc,
+               COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas
+        FROM usuarios u
+        LEFT JOIN sesiones_trabajo s ON s.cliente_id = u.id
+        WHERE u.rol = 'contribuyente'
+        GROUP BY u.id, u.nombre, u.ruc
+        ORDER BY horas DESC, u.nombre COLLATE NOCASE
+    """).fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in filas])
+
+@app.route("/api/admin/tiempo/<int:cliente_id>", methods=["GET"])
+@admin_required
+def detalle_tiempo_cliente(cliente_id):
+    conn = get_db()
+    if not _cliente_valido(conn, cliente_id):
+        conn.close(); return jsonify({"error": "Cliente no encontrado."}), 404
+    sesiones = conn.execute("""
+        SELECT s.*, t.titulo, u.nombre AS usuario_nombre
+        FROM sesiones_trabajo s
+        JOIN tareas t ON t.id = s.tarea_id
+        JOIN usuarios u ON u.id = s.usuario_id
+        WHERE s.cliente_id = ?
+        ORDER BY s.inicio DESC
+    """, (cliente_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(s) for s in sesiones])
+
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
