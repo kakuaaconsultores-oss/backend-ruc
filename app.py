@@ -533,23 +533,39 @@ def superadmin_bootstrap():
             "SELECT * FROM usuarios WHERE rol = 'superadmin' LIMIT 1"
         ).fetchone()
 
+        usuario_configurado = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+        placeholders = {"el usuario que quieras conservar/crear", "superadmin"}
+        if not usuario_configurado or usuario_configurado.lower() in placeholders:
+            usuario_configurado = "superadmin"
+
         if superadmin:
-            usuario = superadmin["usuario"]
             usuario_id = superadmin["id"]
             correo = superadmin["correo"]
+            # Si una instalación histórica creó el SUPERADMIN con el placeholder
+            # accidental, el bootstrap lo corrige en la misma transacción.
+            if superadmin["usuario"] in placeholders or not str(superadmin["usuario"] or "").strip():
+                conflicto = conn.execute(
+                    "SELECT id FROM usuarios WHERE usuario = ? AND id != ?",
+                    (usuario_configurado, usuario_id),
+                ).fetchone()
+                if conflicto:
+                    raise sqlite3.IntegrityError("El usuario 'superadmin' ya pertenece a otra cuenta.")
+                usuario = usuario_configurado
+            else:
+                usuario = superadmin["usuario"]
             conn.execute(
                 """UPDATE usuarios
-                   SET password_hash = ?, activo = 1, debe_cambiar = 0,
+                   SET usuario = ?, password_hash = ?, activo = 1, debe_cambiar = 0,
                        intentos_fallidos = 0, bloqueo_hasta = NULL,
                        token_sesion = NULL, token_sesion_hash = NULL,
                        csrf_token_hash = NULL, token_expira_en = NULL,
                        reset_token_hash = NULL, reset_expira_en = NULL
                    WHERE id = ?""",
-                (hash_password(nueva_password), usuario_id),
+                (usuario, hash_password(nueva_password), usuario_id),
             )
             accion = "password_reset"
         else:
-            usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+            usuario = usuario_configurado
             correo = os.environ.get(
                 "SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com"
             ).strip() or "kakuaaconsultores@gmail.com"
