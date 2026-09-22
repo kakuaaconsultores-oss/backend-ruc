@@ -12,20 +12,9 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_BYTES
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False, expose_headers=["Content-Disposition"])
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "usuarios.db")
 DOCS_DIR = os.path.join(BASE_DIR, "documentos")
-
-# Configuración SMTP (se lee de variables de entorno de Render)
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 
 MAX_INTENTOS = 5
 BLOQUEO_MINUTOS = 30
@@ -35,6 +24,21 @@ SESION_HORAS = 8
 MAX_UPLOAD_MB = 16
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
 MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_BYTES
+CORS_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ORIGINS",
+    "https://kakuaaconsultores-oss.github.io,http://localhost:5500,http://127.0.0.1:5500"
+).split(",") if o.strip()]
+CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}}, supports_credentials=False, expose_headers=["Content-Disposition"])
+
+# Configuración SMTP (se lee de variables de entorno de Render)
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 
 # ---------- Base de datos ----------
 def get_db():
