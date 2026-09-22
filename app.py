@@ -27,6 +27,9 @@ SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 
 MAX_INTENTOS = 5
 BLOQUEO_MINUTOS = 30
+OTP_MINUTOS = 1
+MAX_REGENERACIONES_OTP = 5
+SESION_HORAS = 8
 
 # ---------- Base de datos ----------
 def get_db():
@@ -45,56 +48,90 @@ def init_db():
         intentos_fallidos INTEGER DEFAULT 0,
         bloqueo_hasta TEXT DEFAULT NULL,
         token_sesion TEXT DEFAULT NULL,
+        token_expira_en TEXT DEFAULT NULL,
         rol TEXT DEFAULT 'contribuyente',
+        usuario TEXT,
+        debe_cambiar INTEGER DEFAULT 0,
         creado_en TEXT DEFAULT (datetime('now'))
     )""")
-    # Si la tabla ya existía sin la columna rol, la agregamos
+    for col, definition in [
+        ("rol", "TEXT DEFAULT 'contribuyente'"),
+        ("usuario", "TEXT"),
+        ("debe_cambiar", "INTEGER DEFAULT 0"),
+        ("token_expira_en", "TEXT DEFAULT NULL")
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE usuarios ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS login_otp (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        challenge_token TEXT UNIQUE NOT NULL,
+        otp_hash TEXT NOT NULL,
+        expira_en TEXT NOT NULL,
+        intentos INTEGER DEFAULT 0,
+        generaciones INTEGER DEFAULT 0,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
     try:
-        conn.execute("ALTER TABLE usuarios ADD COLUMN rol TEXT DEFAULT 'contribuyente'")
-    except Exception:
-        pass  # Ya existe
-    ...
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS documentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            nombre_archivo TEXT NOT NULL,
-            ruta TEXT NOT NULL,
-            carpeta TEXT NOT NULL,
-            subcarpeta TEXT DEFAULT '',
-            subcarpeta2 TEXT DEFAULT '',
-            subido_en TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+        conn.execute("ALTER TABLE login_otp ADD COLUMN generaciones INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS documentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        nombre_archivo TEXT NOT NULL,
+        ruta TEXT NOT NULL,
+        carpeta TEXT NOT NULL,
+        subcarpeta TEXT DEFAULT '',
+        subcarpeta2 TEXT DEFAULT '',
+        subido_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS subcarpetas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        carpeta TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        padre TEXT DEFAULT '',
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tickets_recuperacion (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        ruc TEXT NOT NULL,
+        estado TEXT DEFAULT 'pendiente',
+        nueva_password TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        resuelto_en TEXT DEFAULT NULL,
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    )""")
+
+    conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
+    legacy = conn.execute("SELECT id FROM usuarios WHERE ruc = '80000000-0'").fetchone()
+    superadmin = conn.execute("SELECT id FROM usuarios WHERE rol = 'superadmin' LIMIT 1").fetchone()
+    if superadmin:
+        conn.execute("UPDATE usuarios SET rol = 'contribuyente' WHERE rol = 'superadmin' AND id != ?", (superadmin["id"],))
+    elif legacy:
+        conn.execute("UPDATE usuarios SET rol = 'superadmin', usuario = COALESCE(NULLIF(usuario,''), 'superadmin') WHERE id = ?", (legacy["id"],))
+    else:
+        usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+        correo = os.environ.get("SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com").strip() or "kakuaaconsultores@gmail.com"
+        password = os.environ.get("SUPERADMIN_PASSWORD", "").strip()
+        if not password:
+            password = secrets.token_urlsafe(12)
+            print("[SEGURIDAD] SUPERADMIN_PASSWORD no configurada; se generó una contraseña temporal.")
+        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        conn.execute(
+            "INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, 'superadmin', 1)",
+            ("80000000-0", correo, "SUPERADMIN", hashed, usuario)
         )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS subcarpetas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            carpeta TEXT NOT NULL,
-            nombre TEXT NOT NULL,
-            padre TEXT DEFAULT '',
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS tickets_recuperacion (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            ruc TEXT NOT NULL,
-            estado TEXT DEFAULT 'pendiente',
-            nueva_password TEXT DEFAULT NULL,
-            creado_en TEXT DEFAULT (datetime('now')),
-            resuelto_en TEXT DEFAULT NULL,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    """)
-    # Admin inicial
-    cur = conn.execute("SELECT COUNT(*) AS c FROM usuarios WHERE ruc = '80000000-0'")
-    if cur.fetchone()["c"] == 0:
-        hashed = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
-        conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash) VALUES (?, ?, ?, ?)",
-                     ("80000000-0", "admin@kakuaa.com", "Administrador", hashed))
+
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_superadmin ON usuarios(rol) WHERE rol = 'superadmin'")
     conn.commit()
     conn.close()
 
@@ -146,18 +183,33 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         return False
 
 def obtener_usuario_por_token():
-    """Obtiene el usuario autenticado desde el header Authorization (token de sesión)."""
+    """Obtiene el usuario autenticado y valida la expiración de su sesión."""
     auth = request.headers.get("Authorization", "")
     token = auth.replace("Bearer ", "").strip()
     if not token:
         return None
     conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE token_sesion = ?", (token,)).fetchone()
-    conn.close()
     if not u or not u["activo"]:
+        conn.close()
         return None
+    if u["token_expira_en"]:
+        try:
+            if datetime.utcnow() >= datetime.fromisoformat(u["token_expira_en"]):
+                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+                conn.commit()
+                conn.close()
+                return None
+        except ValueError:
+            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+            conn.commit()
+            conn.close()
+            return None
+    conn.close()
     return u
+
 ROLES = ['superadmin', 'admin', 'operativo', 'contribuyente']
+
 
 def puede_gestionar(rol_actual, rol_objetivo):
     """Jerarquía: quién puede gestionar a quién."""
@@ -186,6 +238,31 @@ def usuario_required(f):
             return jsonify({"error": "No autorizado"}), 401
         return f(*args, **kwargs)
     return wrapper
+
+def generar_otp():
+    return f"{secrets.randbelow(10000):04d}"
+
+def enviar_otp(usuario, otp):
+    cuerpo = f"""
+    <h2>Kakuaa Consultores</h2>
+    <p>Hola <strong>{usuario['nombre']}</strong>.</p>
+    <p>Tu código de acceso es:</p>
+    <p style="font-size:28px;font-weight:bold;letter-spacing:8px">{otp}</p>
+    <p>Este código vence en {OTP_MINUTOS} minuto y solo el último código solicitado permanece válido.</p>
+    """
+    return enviar_correo(usuario["correo"], "Tu código de acceso - Kakuaa Consultores", cuerpo)
+
+def crear_desafio_otp(conn, usuario, generaciones=1):
+    conn.execute("DELETE FROM login_otp WHERE usuario_id = ?", (usuario["id"],))
+    challenge = secrets.token_urlsafe(32)
+    otp = generar_otp()
+    expira = datetime.utcnow() + timedelta(minutes=OTP_MINUTOS)
+    conn.execute(
+        "INSERT INTO login_otp (usuario_id, challenge_token, otp_hash, expira_en, intentos, generaciones) VALUES (?, ?, ?, ?, 0, ?)",
+        (usuario["id"], challenge, hash_password(otp), expira.isoformat(), generaciones)
+    )
+    conn.commit()
+    return challenge, otp, generaciones
 
 # ---------- RUTAS ----------
 
@@ -222,7 +299,7 @@ def login():
         conn.execute("UPDATE usuarios SET intentos_fallidos = ? WHERE id = ?", (intentos, u["id"])); conn.commit(); conn.close()
         restantes = MAX_INTENTOS - intentos
         return jsonify({"error": f"Usuario o contraseña incorrectos. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
-    challenge, otp = crear_desafio_otp(conn, u)
+    challenge, otp, _ = crear_desafio_otp(conn, u, 1)
     enviado = enviar_otp(u, otp); conn.close()
     if not enviado: return jsonify({"error": "No se pudo enviar el código de acceso. Intentá nuevamente."}), 503
     return jsonify({"ok": True, "requiere_otp": True, "challenge": challenge, "usuario": {"id": u["id"], "usuario": u["usuario"], "nombre": u["nombre"], "correo": u["correo"], "rol": u["rol"]}})
@@ -250,7 +327,8 @@ def verificar_otp():
         return jsonify({"error": f"Código incorrecto. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
     token = generar_token()
     conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],))
-    conn.execute("UPDATE usuarios SET token_sesion = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (token, row["usuario_id"]))
+    token_expira = datetime.utcnow() + timedelta(hours=SESION_HORAS)
+    conn.execute("UPDATE usuarios SET token_sesion = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (token, token_expira.isoformat(), row["usuario_id"]))
     conn.commit(); conn.close()
     return jsonify({"ok": True, "token": token, "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
 
@@ -260,9 +338,18 @@ def reenviar_otp():
     if not challenge: return jsonify({"error": "Desafío inválido"}), 400
     conn = get_db(); row = conn.execute("SELECT u.* FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
     if not row: conn.close(); return jsonify({"error": "La sesión de verificación ya no es válida. Volvé a iniciar sesión."}), 401
-    new_challenge, otp = crear_desafio_otp(conn, row); enviado = enviar_otp(row, otp); conn.close()
-    if not enviado: return jsonify({"error": "No se pudo enviar el nuevo código."}), 503
-    return jsonify({"ok": True, "challenge": new_challenge, "message": "Se envió un nuevo código. El anterior quedó invalidado."})
+    current = conn.execute("SELECT generaciones FROM login_otp WHERE challenge_token = ?", (challenge,)).fetchone()
+    generaciones = int(current["generaciones"] or 1)
+    if generaciones >= MAX_REGENERACIONES_OTP + 1:
+        conn.close()
+        return jsonify({"error": "Alcanzaste el máximo de 5 solicitudes de nuevo código. Volvé a iniciar sesión."}), 429
+    new_challenge, otp, total_generaciones = crear_desafio_otp(conn, row, generaciones + 1)
+    enviado = enviar_otp(row, otp)
+    conn.close()
+    if not enviado:
+        return jsonify({"error": "No se pudo enviar el nuevo código."}), 503
+    restantes = max(0, MAX_REGENERACIONES_OTP - (total_generaciones - 1))
+    return jsonify({"ok": True, "challenge": new_challenge, "regeneraciones_restantes": restantes, "message": "Se envió un nuevo código. El anterior quedó invalidado."})
 # Cambiar contraseña (obligatorio en primer ingreso o tras reset admin)
 @app.route("/api/cambiar-password", methods=["POST"])
 @usuario_required
@@ -277,7 +364,7 @@ def cambiar_password():
 
     nuevo_hash = hash_password(nueva_password)
     conn = get_db()
-    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL WHERE id = ?", (nuevo_hash, u["id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
@@ -288,7 +375,7 @@ def logout():
     u = obtener_usuario_por_token()
     if u:
         conn = get_db()
-        conn.execute("UPDATE usuarios SET token_sesion = NULL WHERE id = ?", (u["id"],))
+        conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
         conn.commit()
         conn.close()
     return jsonify({"ok": True})
@@ -343,7 +430,7 @@ def aprobar_ticket(ticket_id):
         conn.close()
         return jsonify({"error": "Este ticket ya fue resuelto"}), 400
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
     conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = ?, resuelto_en = datetime('now') WHERE id = ?", (nueva_password, ticket_id))
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
@@ -394,14 +481,21 @@ def crear_usuario():
     ruc = data.get("ruc", "").strip()
     correo = data.get("correo", "").strip()
     nombre = data.get("nombre", "").strip()
+    usuario_nuevo = data.get("usuario", "").strip() or ruc
     contrasena = data.get("contrasena", "")
-    if not ruc or not correo or not nombre or not contrasena:
+    rol_nuevo = data.get("rol", "contribuyente").strip()
+    if not ruc or not correo or not nombre or not contrasena or not usuario_nuevo:
         return jsonify({"error": "Faltan datos"}), 400
+    if rol_nuevo not in ("admin", "operativo", "contribuyente"):
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
+    u_actual = obtener_usuario_por_token()
+    if not puede_gestionar(u_actual["rol"], rol_nuevo):
+        return jsonify({"error": "No tenés permisos para crear este rol."}), 403
     conn = get_db()
     try:
         hashed = hash_password(contrasena)
-        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, debe_cambiar) VALUES (?, ?, ?, ?, 1)",
-                           (ruc, correo, nombre, hashed))
+        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                           (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
         conn.commit()
         return jsonify({"ok": True, "id": cur.lastrowid}), 201
     except sqlite3.IntegrityError:
@@ -466,26 +560,46 @@ def resetear_password(usuario_id):
     return jsonify({"ok": True, "message": "Contraseña actualizada y correo enviado"})
 
 # Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
+@app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
+@admin_required
+def cambiar_estado(usuario_id):
+    data = request.get_json() or {}
+    activo = bool(data.get("activo"))
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if objetivo["rol"] == "superadmin":
+        conn.close()
+        return jsonify({"error": "No se puede deshabilitar al SUPERADMIN."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.execute("UPDATE usuarios SET activo = ?, token_sesion = CASE WHEN ? = 0 THEN NULL ELSE token_sesion END, token_expira_en = CASE WHEN ? = 0 THEN NULL ELSE token_expira_en END WHERE id = ?", (1 if activo else 0, 1 if activo else 0, 1 if activo else 0, usuario_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+# Admin: asignar rol
 @app.route("/api/admin/usuarios/<int:usuario_id>/rol", methods=["PUT"])
 @admin_required
 def asignar_rol(usuario_id):
     data = request.get_json() or {}
     nuevo_rol = data.get("rol", "").strip()
-    if nuevo_rol not in ROLES:
-        return jsonify({"error": "Rol inválido"}), 400
+    if nuevo_rol not in ROLES or nuevo_rol == "superadmin":
+        return jsonify({"error": "Rol inválido o no permitido"}), 400
     u_actual = obtener_usuario_por_token()
     conn = get_db()
-    u_objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
-    if not u_objetivo:
+    objetivo = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u_objetivo["rol"] == "superadmin" or nuevo_rol == "superadmin":
+    if objetivo["rol"] == "superadmin":
         conn.close()
-        return jsonify({"error": "El SUPERADMIN es único y no puede ser creado, reemplazado ni degradado desde este módulo."}), 403
-    if u_actual["rol"] == "admin" and nuevo_rol == "admin":
-        conn.close()
-        return jsonify({"error": "Solo el SUPERADMIN puede asignar el rol administrador."}), 403
-    if not puede_gestionar(u_actual["rol"], u_objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
+        return jsonify({"error": "El SUPERADMIN es único y no puede ser modificado desde este módulo."}), 403
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
         conn.close()
         return jsonify({"error": "No tenés permisos para esta operación."}), 403
     conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
