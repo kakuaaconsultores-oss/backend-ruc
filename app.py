@@ -606,6 +606,97 @@ def superadmin_bootstrap():
         "message": "SUPERADMIN listo. El secreto de bootstrap ya no puede volver a utilizarse."
     })
 
+@app.route("/api/superadmin/repair", methods=["POST"])
+def superadmin_repair():
+    """Repara una cuenta SUPERADMIN creada con un usuario histórico incorrecto.
+    Esta ruta es temporal y debe eliminarse después de recuperar producción.
+    """
+    conn = get_db()
+    if rate_limit_exceeded(conn, "superadmin_bootstrap"):
+        conn.close()
+        return rate_limit_response()
+
+    bootstrap_secret = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
+    if not bootstrap_secret or len(bootstrap_secret) < 32:
+        conn.close()
+        return jsonify({"error": "El procedimiento de reparación no está habilitado."}), 503
+
+    data = request.get_json(silent=True) or {}
+    provided_secret = str(data.get("bootstrap_secret", "")).strip()
+    nueva_password = str(data.get("nueva_password", ""))
+    if not provided_secret or not secrets.compare_digest(
+        provided_secret.encode("utf-8"), bootstrap_secret.encode("utf-8")
+    ):
+        conn.close()
+        return jsonify({"error": "Credencial de reparación inválida."}), 403
+
+    error_password = validar_politica_password(nueva_password)
+    if error_password:
+        conn.close()
+        return jsonify({"error": error_password}), 400
+
+    usuario_configurado = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+    placeholders = {"el usuario que quieras conservar/crear", "superadmin"}
+    if usuario_configurado.lower() in placeholders:
+        usuario_configurado = "superadmin"
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        superadmin = conn.execute(
+            "SELECT * FROM usuarios WHERE rol = 'superadmin' LIMIT 1"
+        ).fetchone()
+
+        if superadmin:
+            conflicto = conn.execute(
+                "SELECT id FROM usuarios WHERE usuario = ? AND id != ?",
+                (usuario_configurado, superadmin["id"]),
+            ).fetchone()
+            if conflicto:
+                conn.rollback()
+                conn.close()
+                return jsonify({
+                    "error": "El usuario configurado para SUPERADMIN ya pertenece a otra cuenta.",
+                    "requiere_revision": True
+                }), 409
+
+            conn.execute(
+                """UPDATE usuarios
+                   SET usuario = ?, password_hash = ?, activo = 1, debe_cambiar = 0,
+                       intentos_fallidos = 0, bloqueo_hasta = NULL,
+                       token_sesion = NULL, token_sesion_hash = NULL,
+                       csrf_token_hash = NULL, token_expira_en = NULL,
+                       reset_token_hash = NULL, reset_expira_en = NULL
+                   WHERE id = ?""",
+                (usuario_configurado, hash_password(nueva_password), superadmin["id"]),
+            )
+            accion = "superadmin_repaired"
+            usuario = usuario_configurado
+            correo = superadmin["correo"]
+        else:
+            correo = os.environ.get(
+                "SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com"
+            ).strip() or "kakuaaconsultores@gmail.com"
+            ruc_superadmin = "SUPERADMIN-000000"
+            conn.execute(
+                """INSERT INTO usuarios
+                   (ruc, correo, nombre, password_hash, activo, usuario, rol, debe_cambiar)
+                   VALUES (?, ?, 'SUPERADMIN', ?, 1, ?, 'superadmin', 0)""",
+                (ruc_superadmin, correo, hash_password(nueva_password), usuario_configurado),
+            )
+            accion = "superadmin_created"
+            usuario = usuario_configurado
+
+        conn.commit()
+        return jsonify({"ok": True, "accion": accion, "usuario": usuario, "correo": correo})
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return jsonify({"error": "No se pudo reparar la cuenta SUPERADMIN por una restricción de datos."}), 409
+    except Exception:
+        conn.rollback()
+        return jsonify({"error": "No se pudo completar la reparación del SUPERADMIN."}), 500
+    finally:
+        conn.close()
+
 @app.route("/api/login", methods=["POST"])
 def login():
     conn = get_db()
