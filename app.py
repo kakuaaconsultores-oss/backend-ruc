@@ -382,7 +382,7 @@ def rechazar_ticket(ticket_id):
 @admin_required
 def listar_usuarios():
     conn = get_db()
-    usuarios = conn.execute("SELECT id, ruc, correo, nombre, activo FROM usuarios ORDER BY id").fetchall()
+    usuarios = conn.execute("SELECT id, usuario, ruc, correo, nombre, activo, rol, debe_cambiar FROM usuarios ORDER BY CASE rol WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 WHEN 'operativo' THEN 2 ELSE 3 END, id").fetchall()
     conn.close()
     return jsonify([dict(u) for u in usuarios])
 
@@ -421,7 +421,7 @@ def editar_usuario(usuario_id):
     if not u:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    if u["ruc"] == "80000000-0":
+    if u["rol"] == "superadmin":
         conn.close()
         return jsonify({"error": "No podés editar al administrador principal"}), 403
     try:
@@ -470,7 +470,7 @@ def resetear_password(usuario_id):
 @admin_required
 def asignar_rol(usuario_id):
     data = request.get_json() or {}
-    nuevo_rol = data.get("rol", "")
+    nuevo_rol = data.get("rol", "").strip()
     if nuevo_rol not in ROLES:
         return jsonify({"error": "Rol inválido"}), 400
     u_actual = obtener_usuario_por_token()
@@ -479,23 +479,20 @@ def asignar_rol(usuario_id):
     if not u_objetivo:
         conn.close()
         return jsonify({"error": "Usuario no encontrado"}), 404
-    # Reglas de jerarquía
-    if nuevo_rol == 'admin' and u_actual["rol"] != 'superadmin':
+    if u_objetivo["rol"] == "superadmin" or nuevo_rol == "superadmin":
         conn.close()
-        return jsonify({"error": "Solo el superadmin puede asignar el rol admin"}), 403
-    if not puede_gestionar(u_actual["rol"], u_objetivo["rol"]):
+        return jsonify({"error": "El SUPERADMIN es único y no puede ser creado, reemplazado ni degradado desde este módulo."}), 403
+    if u_actual["rol"] == "admin" and nuevo_rol == "admin":
         conn.close()
-        return jsonify({"error": "No tenés permiso para modificar a este usuario"}), 403
-    # Un admin no puede elevar a otro admin ni a superadmin
-    if nuevo_rol == 'superadmin' and u_actual["rol"] != 'superadmin':
+        return jsonify({"error": "Solo el SUPERADMIN puede asignar el rol administrador."}), 403
+    if not puede_gestionar(u_actual["rol"], u_objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
         conn.close()
-        return jsonify({"error": "No autorizado"}), 403
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
     conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Rol actualizado"})
 
-# Admin: listar documentos de un usuario
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
 @admin_required
 def admin_documentos(usuario_id):
