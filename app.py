@@ -410,7 +410,9 @@ def superadmin_bootstrap():
     data = request.get_json(silent=True) or {}
     provided_secret = str(data.get("bootstrap_secret", "")).strip()
     nueva_password = str(data.get("nueva_password", ""))
-    if not provided_secret or not secrets.compare_digest(\n        provided_secret.encode("utf-8"), bootstrap_secret.encode("utf-8")\n    ):
+    if not provided_secret or not secrets.compare_digest(
+        provided_secret.encode("utf-8"), bootstrap_secret.encode("utf-8")
+    ):
         conn.close()
         return jsonify({"error": "Credencial de bootstrap inválida."}), 403
 
