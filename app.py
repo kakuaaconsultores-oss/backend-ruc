@@ -850,7 +850,7 @@ def asignar_rol(usuario_id):
     if not puede_gestionar(u_actual["rol"], objetivo["rol"]) or not puede_gestionar(u_actual["rol"], nuevo_rol):
         conn.close()
         return jsonify({"error": "No tenés permisos para esta operación."}), 403
-    conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, usuario_id))
+    conn.execute("UPDATE usuarios SET rol = ?, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_rol, usuario_id))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Rol actualizado"})
