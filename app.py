@@ -395,16 +395,20 @@ def solicitar_reset():
         return jsonify({"error": "Ingresá tu RUC"}), 400
     conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
-    if not u:
-        return jsonify({"error": "El RUC no existe en el sistema"}), 404
-    pendiente = conn.execute("SELECT * FROM tickets_recuperacion WHERE usuario_id = ? AND estado = 'pendiente'", (u["id"],)).fetchone()
-    if pendiente:
-        conn.close()
-        return jsonify({"error": "Ya tenés un pedido de reset pendiente. Esperá a que el administrador lo apruebe."}), 409
-    conn.execute("INSERT INTO tickets_recuperacion (usuario_id, ruc) VALUES (?, ?)", (u["id"], ruc))
-    conn.commit()
+    if u:
+        pendiente = conn.execute(
+            "SELECT id FROM tickets_recuperacion WHERE usuario_id = ? AND estado = 'pendiente'",
+            (u["id"],)
+        ).fetchone()
+        if not pendiente:
+            conn.execute(
+                "INSERT INTO tickets_recuperacion (usuario_id, ruc) VALUES (?, ?)",
+                (u["id"], ruc)
+            )
+            conn.commit()
     conn.close()
-    return jsonify({"ok": True, "message": "Solicitud enviada. El administrador la revisará."})
+    # Respuesta genérica para no revelar si el RUC existe o si ya tiene un pedido pendiente.
+    return jsonify({"ok": True, "message": "Si los datos corresponden a una cuenta, la solicitud fue registrada y será revisada por un administrador."})
 
 # Admin: listar tickets
 @app.route("/api/admin/tickets", methods=["GET"])
@@ -616,7 +620,15 @@ def asignar_rol(usuario_id):
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["GET"])
 @admin_required
 def admin_documentos(usuario_id):
+    u_actual = obtener_usuario_por_token()
     conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
     docs = conn.execute("SELECT * FROM documentos WHERE usuario_id = ? ORDER BY subido_en DESC", (usuario_id,)).fetchall()
     conn.close()
     return jsonify([dict(d) for d in docs])
@@ -625,6 +637,17 @@ def admin_documentos(usuario_id):
 @app.route("/api/admin/usuarios/<int:usuario_id>/documentos", methods=["POST"])
 @admin_required
 def admin_subir_documento(usuario_id):
+    u_actual = obtener_usuario_por_token()
+    conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    conn.close()
+
     archivo = request.files.get("archivo")
     carpeta = request.form.get("carpeta", "")
     subcarpeta = request.form.get("subcarpeta", "")
@@ -662,11 +685,16 @@ def admin_subir_documento(usuario_id):
 @app.route("/api/admin/documentos/<int:doc_id>", methods=["DELETE"])
 @admin_required
 def admin_eliminar_documento(doc_id):
+    u_actual = obtener_usuario_por_token()
     conn = get_db()
     d = conn.execute("SELECT * FROM documentos WHERE id = ?", (doc_id,)).fetchone()
     if not d:
         conn.close()
         return jsonify({"error": "Documento no encontrado"}), 404
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (d["usuario_id"],)).fetchone()
+    if not objetivo or not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
     if os.path.exists(d["ruta"]):
         os.remove(d["ruta"])
     conn.execute("DELETE FROM documentos WHERE id = ?", (doc_id,))
@@ -678,7 +706,15 @@ def admin_eliminar_documento(doc_id):
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas", methods=["GET"])
 @admin_required
 def admin_subcarpetas(usuario_id):
+    u_actual = obtener_usuario_por_token()
     conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
     subs = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ?", (usuario_id,)).fetchall()
     conn.close()
     return jsonify([dict(s) for s in subs])
@@ -689,11 +725,28 @@ def admin_subcarpetas(usuario_id):
 def admin_crear_subcarpeta(usuario_id):
     data = request.get_json() or {}
     carpeta = data.get("carpeta", "")
-    nombre = data.get("nombre", "").strip()
-    padre = data.get("padre", "")
-    if not carpeta or not nombre:
-        return jsonify({"error": "Faltan datos"}), 400
+    nombre = secure_filename(data.get("nombre", "").strip())
+    padre = secure_filename(data.get("padre", "").strip()) if data.get("padre") else ""
+    carpetas_permitidas = {"Declaraciones", "Balances", "Estados de Cuentas", "Facturas"}
+    if carpeta not in carpetas_permitidas or not nombre:
+        return jsonify({"error": "Datos de subcarpeta inválidos"}), 400
     conn = get_db()
+    u_actual = obtener_usuario_por_token()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
+    if padre:
+        parent = conn.execute(
+            "SELECT id FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ?",
+            (usuario_id, carpeta, padre)
+        ).fetchone()
+        if not parent:
+            conn.close()
+            return jsonify({"error": "Subcarpeta padre no encontrada"}), 404
     existe = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND carpeta = ? AND nombre = ? AND padre = ?",
                           (usuario_id, carpeta, nombre, padre)).fetchone()
     if existe:
@@ -709,7 +762,16 @@ def admin_crear_subcarpeta(usuario_id):
 @app.route("/api/admin/usuarios/<int:usuario_id>/subcarpetas/<path:nombre>", methods=["DELETE"])
 @admin_required
 def admin_eliminar_subcarpeta(usuario_id, nombre):
+    u_actual = obtener_usuario_por_token()
+    nombre = secure_filename(nombre)
     conn = get_db()
+    objetivo = conn.execute("SELECT rol FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if not objetivo:
+        conn.close()
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    if not puede_gestionar(u_actual["rol"], objetivo["rol"]):
+        conn.close()
+        return jsonify({"error": "No tenés permisos para esta operación."}), 403
     s = conn.execute("SELECT * FROM subcarpetas WHERE usuario_id = ? AND nombre = ?", (usuario_id, nombre)).fetchone()
     if not s:
         conn.close()
