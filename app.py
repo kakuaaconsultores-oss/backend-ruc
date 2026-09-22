@@ -3,6 +3,8 @@ import sqlite3
 import time
 import smtplib
 import secrets
+import hashlib
+import html
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -57,6 +59,7 @@ def init_db():
         intentos_fallidos INTEGER DEFAULT 0,
         bloqueo_hasta TEXT DEFAULT NULL,
         token_sesion TEXT DEFAULT NULL,
+        token_sesion_hash TEXT DEFAULT NULL,
         token_expira_en TEXT DEFAULT NULL,
         rol TEXT DEFAULT 'contribuyente',
         usuario TEXT,
@@ -67,7 +70,8 @@ def init_db():
         ("rol", "TEXT DEFAULT 'contribuyente'"),
         ("usuario", "TEXT"),
         ("debe_cambiar", "INTEGER DEFAULT 0"),
-        ("token_expira_en", "TEXT DEFAULT NULL")
+        ("token_expira_en", "TEXT DEFAULT NULL"),
+        ("token_sesion_hash", "TEXT DEFAULT NULL")
     ]:
         try:
             conn.execute(f"ALTER TABLE usuarios ADD COLUMN {col} {definition}")
@@ -160,6 +164,25 @@ def check_password(pw, hashed):
 def generar_token():
     return secrets.token_urlsafe(32)
 
+def hash_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def ruta_segura(base_dir, *partes):
+    limpia = []
+    for parte in partes:
+        parte = str(parte or "")
+        if os.path.isabs(parte) or parte in (".", "..") or ".." in parte.replace("\\", "/").split("/"):
+            raise ValueError("Ruta inválida")
+        segura = secure_filename(parte)
+        if not segura:
+            raise ValueError("Ruta inválida")
+        limpia.append(segura)
+    base_real = os.path.realpath(base_dir)
+    destino = os.path.realpath(os.path.join(base_real, *limpia))
+    if os.path.commonpath([base_real, destino]) != base_real:
+        raise ValueError("Ruta fuera del directorio permitido")
+    return destino
+
 def validar_politica_password(pw):
     """Valida la política de seguridad de contraseñas."""
     if len(pw) < 6:
@@ -199,19 +222,22 @@ def obtener_usuario_por_token():
     if not token:
         return None
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion = ?", (token,)).fetchone()
+    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion_hash = ? OR token_sesion = ?", (hash_token(token), token)).fetchone()
     if not u or not u["activo"]:
         conn.close()
         return None
+    if u["token_sesion"]:
+        conn.execute("UPDATE usuarios SET token_sesion_hash = ?, token_sesion = NULL WHERE id = ?", (hash_token(token), u["id"]))
+        conn.commit()
     if u["token_expira_en"]:
         try:
             if datetime.utcnow() >= datetime.fromisoformat(u["token_expira_en"]):
-                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
                 conn.commit()
                 conn.close()
                 return None
         except ValueError:
-            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
             conn.commit()
             conn.close()
             return None
@@ -255,7 +281,7 @@ def generar_otp():
 def enviar_otp(usuario, otp):
     cuerpo = f"""
     <h2>Kakuaa Consultores</h2>
-    <p>Hola <strong>{usuario['nombre']}</strong>.</p>
+    <p>Hola <strong>{html.escape(str(usuario["nombre"]))}</strong>.</p>
     <p>Tu código de acceso es:</p>
     <p style="font-size:28px;font-weight:bold;letter-spacing:8px">{otp}</p>
     <p>Este código vence en {OTP_MINUTOS} minuto y solo el último código solicitado permanece válido.</p>
@@ -338,7 +364,7 @@ def verificar_otp():
     token = generar_token()
     conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],))
     token_expira = datetime.utcnow() + timedelta(hours=SESION_HORAS)
-    conn.execute("UPDATE usuarios SET token_sesion = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (token, token_expira.isoformat(), row["usuario_id"]))
+    conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hash_token(token), token_expira.isoformat(), row["usuario_id"]))
     conn.commit(); conn.close()
     return jsonify({"ok": True, "token": token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
 
@@ -374,7 +400,7 @@ def cambiar_password():
 
     nuevo_hash = hash_password(nueva_password)
     conn = get_db()
-    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
@@ -385,7 +411,7 @@ def logout():
     u = obtener_usuario_por_token()
     if u:
         conn = get_db()
-        conn.execute("UPDATE usuarios SET token_sesion = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+        conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
         conn.commit()
         conn.close()
     return jsonify({"ok": True})
@@ -433,8 +459,9 @@ def listar_tickets():
 def aprobar_ticket(ticket_id):
     data = request.get_json() or {}
     nueva_password = data.get("nueva_password", "")
-    if not nueva_password or len(nueva_password) < 6:
-        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+    error_password = validar_politica_password(nueva_password)
+    if error_password:
+        return jsonify({"error": error_password}), 400
     conn = get_db()
     t = conn.execute("SELECT * FROM tickets_recuperacion WHERE id = ?", (ticket_id,)).fetchone()
     if not t:
@@ -452,7 +479,7 @@ def aprobar_ticket(ticket_id):
         conn.close()
         return jsonify({"error": "No tenés permisos para resolver este ticket."}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, t["usuario_id"]))
     conn.execute("UPDATE tickets_recuperacion SET estado = 'aprobado', nueva_password = NULL, resuelto_en = datetime('now') WHERE id = ?", (ticket_id,))
     conn.commit()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (t["usuario_id"],)).fetchone()
@@ -460,9 +487,9 @@ def aprobar_ticket(ticket_id):
     if u and u["correo"]:
         cuerpo = f"""
         <h2>Kakuaa Consultores</h2>
-        <p>Hola <strong>{u['nombre']}</strong>,</p>
+        <p>Hola <strong>{html.escape(str(u["nombre"]))}</strong>,</p>
         <p>Tu contraseña fue restablecida por el administrador.</p>
-        <p><strong>Tu nueva contraseña es:</strong> <code>{nueva_password}</code></p>
+        <p><strong>Tu nueva contraseña es:</strong> <code>{html.escape(nueva_password)}</code></p>
         <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
         <p>Saludos,<br>Equipo Kakuaa Consultores</p>
         """
@@ -570,8 +597,9 @@ def editar_usuario(usuario_id):
 def resetear_password(usuario_id):
     data = request.get_json() or {}
     nueva_password = data.get("nueva_password", "")
-    if not nueva_password or len(nueva_password) < 6:
-        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+    error_password = validar_politica_password(nueva_password)
+    if error_password:
+        return jsonify({"error": error_password}), 400
     conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
     if not u:
@@ -582,15 +610,15 @@ def resetear_password(usuario_id):
         conn.close()
         return jsonify({"error": "No tenés permisos para resetear este usuario."}), 403
     hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
+    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
     conn.commit()
     conn.close()
     if u["correo"]:
         cuerpo = f"""
         <h2>Kakuaa Consultores</h2>
-        <p>Hola <strong>{u['nombre']}</strong>,</p>
+        <p>Hola <strong>{html.escape(str(u["nombre"]))}</strong>,</p>
         <p>Tu contraseña fue restablecida por el administrador.</p>
-        <p><strong>Tu nueva contraseña es:</strong> <code>{nueva_password}</code></p>
+        <p><strong>Tu nueva contraseña es:</strong> <code>{html.escape(nueva_password)}</code></p>
         <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
         <p>Saludos,<br>Equipo Kakuaa Consultores</p>
         """
@@ -693,14 +721,17 @@ def admin_subir_documento(usuario_id):
         return jsonify({"error": "Tipo de archivo no permitido"}), 400
     subcarpeta = secure_filename(subcarpeta) if subcarpeta else ""
     subcarpeta2 = secure_filename(subcarpeta2) if subcarpeta2 else ""
-    dir_usuario = os.path.join(DOCS_DIR, str(usuario_id))
-    dir_carpeta = os.path.join(dir_usuario, carpeta)
-    if subcarpeta:
-        dir_carpeta = os.path.join(dir_carpeta, subcarpeta)
-    if subcarpeta2:
-        dir_carpeta = os.path.join(dir_carpeta, subcarpeta2)
+    try:
+        dir_usuario = ruta_segura(DOCS_DIR, str(usuario_id))
+        dir_carpeta = ruta_segura(dir_usuario, carpeta)
+        if subcarpeta:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta)
+        if subcarpeta2:
+            dir_carpeta = ruta_segura(dir_carpeta, subcarpeta2)
+        ruta = ruta_segura(dir_carpeta, nombre_archivo)
+    except ValueError:
+        return jsonify({"error": "Ruta de archivo inválida"}), 400
     os.makedirs(dir_carpeta, exist_ok=True)
-    ruta = os.path.join(dir_carpeta, nombre_archivo)
     archivo.save(ruta)
     conn = get_db()
     cur = conn.execute("INSERT INTO documentos (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2) VALUES (?, ?, ?, ?, ?, ?)",
@@ -831,7 +862,14 @@ def descargar_documento(doc_id):
     conn.close()
     if not d:
         return jsonify({"error": "No autorizado"}), 403
-    return send_from_directory(os.path.dirname(d["ruta"]), os.path.basename(d["ruta"]), as_attachment=True)
+    try:
+        ruta = os.path.realpath(d["ruta"])
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([docs_real, ruta]) != docs_real or not os.path.isfile(ruta):
+            return jsonify({"error": "Documento no disponible"}), 404
+    except ValueError:
+        return jsonify({"error": "Ruta de documento inválida"}), 400
+    return send_from_directory(os.path.dirname(ruta), os.path.basename(ruta), as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
