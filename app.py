@@ -41,6 +41,7 @@ RATE_LIMITS = {
     "request_reset": 5,
     "reset_password": 5,
     "change_password": 5,
+    "superadmin_bootstrap": 5,
 }
 
 app = Flask(__name__)
@@ -75,6 +76,12 @@ def init_db():
         creado_en REAL NOT NULL
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_events ON rate_limit_events(ip, endpoint, creado_en)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS superadmin_bootstrap (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        usado INTEGER NOT NULL DEFAULT 0,
+        usado_en TEXT DEFAULT NULL
+    )""")
+    conn.execute("INSERT OR IGNORE INTO superadmin_bootstrap (id, usado) VALUES (1, 0)")
     conn.execute("""CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ruc TEXT UNIQUE NOT NULL,
@@ -383,6 +390,105 @@ def healthz():
     return jsonify({"status": "ok"})
 
 # Login con límite de intentos y token de sesión
+@app.route("/api/superadmin/bootstrap", methods=["POST"])
+def superadmin_bootstrap():
+    """
+    Recuperación/alta inicial del único SUPERADMIN mediante un secreto temporal
+    configurado fuera del código (por ejemplo, en Render).
+
+    El secreto nunca se devuelve ni se persiste. La operación queda marcada como
+    usada en SQLite después de un reset/alta exitoso y no puede repetirse.
+    """
+    conn = get_db()
+    if rate_limit_exceeded(conn, "superadmin_bootstrap"):
+        conn.close()
+        return rate_limit_response()
+
+    bootstrap_secret = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
+    if not bootstrap_secret:
+        conn.close()
+        return jsonify({"error": "El procedimiento de bootstrap no está habilitado."}), 503
+    if len(bootstrap_secret) < 32:
+        conn.close()
+        return jsonify({"error": "La configuración de bootstrap no cumple la longitud mínima de seguridad."}), 503
+
+    data = request.get_json(silent=True) or {}
+    provided_secret = str(data.get("bootstrap_secret", "")).strip()
+    nueva_password = str(data.get("nueva_password", ""))
+    if not provided_secret or not secrets.compare_digest(provided_secret, bootstrap_secret):
+        conn.close()
+        return jsonify({"error": "Credencial de bootstrap inválida."}), 403
+
+    error_password = validar_politica_password(nueva_password)
+    if error_password:
+        conn.close()
+        return jsonify({"error": error_password}), 400
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        estado = conn.execute(
+            "SELECT usado FROM superadmin_bootstrap WHERE id = 1"
+        ).fetchone()
+        if estado and estado["usado"]:
+            conn.rollback()
+            conn.close()
+            return jsonify({"error": "El bootstrap del SUPERADMIN ya fue utilizado."}), 409
+
+        superadmin = conn.execute(
+            "SELECT * FROM usuarios WHERE rol = 'superadmin' LIMIT 1"
+        ).fetchone()
+
+        if superadmin:
+            usuario = superadmin["usuario"]
+            usuario_id = superadmin["id"]
+            correo = superadmin["correo"]
+            conn.execute(
+                """UPDATE usuarios
+                   SET password_hash = ?, activo = 1, debe_cambiar = 0,
+                       intentos_fallidos = 0, bloqueo_hasta = NULL,
+                       token_sesion = NULL, token_sesion_hash = NULL,
+                       csrf_token_hash = NULL, token_expira_en = NULL,
+                       reset_token_hash = NULL, reset_expira_en = NULL
+                   WHERE id = ?""",
+                (hash_password(nueva_password), usuario_id),
+            )
+            accion = "password_reset"
+        else:
+            usuario = os.environ.get("SUPERADMIN_USUARIO", "superadmin").strip() or "superadmin"
+            correo = os.environ.get(
+                "SUPERADMIN_EMAIL", "kakuaaconsultores@gmail.com"
+            ).strip() or "kakuaaconsultores@gmail.com"
+            cur = conn.execute(
+                """INSERT INTO usuarios
+                   (ruc, correo, nombre, password_hash, activo, usuario, rol, debe_cambiar)
+                   VALUES (?, ?, 'SUPERADMIN', ?, 1, ?, 'superadmin', 0)""",
+                ("80000000-0", correo, hash_password(nueva_password), usuario),
+            )
+            usuario_id = cur.lastrowid
+            accion = "superadmin_created"
+
+        conn.execute(
+            "UPDATE superadmin_bootstrap SET usado = 1, usado_en = datetime('now') WHERE id = 1"
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "No se pudo completar el bootstrap del SUPERADMIN."}), 409
+    except Exception:
+        conn.rollback()
+        conn.close()
+        return jsonify({"error": "No se pudo completar el bootstrap del SUPERADMIN."}), 500
+
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "accion": accion,
+        "usuario": usuario,
+        "correo": correo,
+        "message": "SUPERADMIN listo. El secreto de bootstrap ya no puede volver a utilizarse."
+    })
+
 @app.route("/api/login", methods=["POST"])
 def login():
     conn = get_db()
