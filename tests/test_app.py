@@ -443,16 +443,12 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertTrue(challenge)
 
 
-    def test_recovery_approval_revokes_session_and_keeps_no_plaintext_password(self):
+    def test_recovery_approval_sends_single_use_reset_link(self):
         self.add_user("recover-approved")
         self.add_user("recovery-admin", "admin")
-
         old_token = self.verify(self.login("recover-approved"))
 
-        request_reset = self.client.post(
-            "/api/solicitar-reset",
-            json={"ruc": "recover-approved-ruc"},
-        )
+        request_reset = self.client.post("/api/solicitar-reset", json={"ruc": "recover-approved-ruc"})
         self.assertEqual(request_reset.status_code, 200)
 
         conn = get_db()
@@ -461,21 +457,16 @@ class KakuaaApiTests(unittest.TestCase):
             (self._user_id("recover-approved"),),
         ).fetchone()
         conn.close()
-        self.assertIsNotNone(ticket)
 
         admin_token = self.verify(self.login("recovery-admin"))
         response = self.client.post(
-            f"/api/admin/tickets/{ticket["id"]}/aprobar",
+            f"/api/admin/tickets/{ticket['id']}/aprobar",
             headers=self.auth(admin_token),
-            json={"nueva_password": "Reset123!"},
         )
         self.assertEqual(response.status_code, 200)
 
         self.assertEqual(
-            self.client.get(
-                "/api/mis-documentos",
-                headers=self.auth(old_token),
-            ).status_code,
+            self.client.get("/api/mis-documentos", headers=self.auth(old_token)).status_code,
             401,
         )
 
@@ -485,18 +476,13 @@ class KakuaaApiTests(unittest.TestCase):
             (ticket["id"],),
         ).fetchone()
         user = conn.execute(
-            "SELECT debe_cambiar FROM usuarios WHERE usuario = ?",
+            "SELECT reset_token_hash, reset_expira_en, debe_cambiar FROM usuarios WHERE usuario = ?",
             ("recover-approved",),
         ).fetchone()
         conn.close()
 
         self.assertEqual(row["estado"], "aprobado")
         self.assertIsNone(row["nueva_password"])
-        self.assertEqual(user["debe_cambiar"], 1)
-
-        challenge = self.login("recover-approved", "Reset123!")
-        self.assertTrue(challenge)
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        self.assertTrue(user["reset_token_hash"])
+        self.assertTrue(user["reset_expira_en"])
+        self.assertEqual(user["debe_cambiar"], 0)
