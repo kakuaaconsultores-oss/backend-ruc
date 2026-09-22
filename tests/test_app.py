@@ -12,6 +12,7 @@ os.environ["SUPERADMIN_PASSWORD"] = "Super123!"
 os.environ["SUPERADMIN_EMAIL"] = "superadmin@test.local"
 os.environ["COOKIE_SECURE"] = "0"
 os.environ["SESSION_COOKIE_NAME"] = "kakuaa_test_session"
+os.environ["SUPERADMIN_BOOTSTRAP_SECRET"] = "test-bootstrap-secret-" + "x" * 40
 
 from app import app, get_db, hash_password
 
@@ -39,10 +40,11 @@ class KakuaaApiTests(unittest.TestCase):
         conn.execute("DELETE FROM subcarpetas")
         conn.execute("DELETE FROM tickets_recuperacion")
         conn.execute("DELETE FROM usuarios WHERE rol != 'superadmin'")
-        conn.execute("""UPDATE usuarios SET intentos_fallidos=0, bloqueo_hasta=NULL,
+        conn.execute("""UPDATE usuarios SET password_hash=?, intentos_fallidos=0, bloqueo_hasta=NULL,
                         token_sesion=NULL, token_sesion_hash=NULL, csrf_token_hash=NULL, token_expira_en=NULL,
-                        debe_cambiar=0, activo=1
-                        WHERE rol='superadmin'""")
+                        reset_token_hash=NULL, reset_expira_en=NULL, debe_cambiar=0, activo=1
+                        WHERE rol='superadmin'""", (hash_password("Super123!"),))
+        conn.execute("UPDATE superadmin_bootstrap SET usado=0, usado_en=NULL WHERE id=1")
         conn.commit()
         self.__class__.last_email = ()
         self.superadmin_id = conn.execute(
@@ -89,6 +91,45 @@ class KakuaaApiTests(unittest.TestCase):
 
     def auth(self, token):
         return {"X-CSRF-Token": token}
+
+    def test_superadmin_bootstrap_is_one_time_and_invalidates_sessions(self):
+        csrf = self.verify(self.login("superadmin-test", "Super123!"))
+
+        invalid = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={"bootstrap_secret": "wrong-secret", "nueva_password": "NewSuper123!"},
+        )
+        self.assertEqual(invalid.status_code, 403)
+
+        response = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "NewSuper123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(data["accion"], "password_reset")
+        self.assertEqual(data["usuario"], "superadmin-test")
+        self.assertNotIn("bootstrap_secret", data)
+        self.assertNotIn("password", data)
+
+        self.assertEqual(
+            self.client.get("/api/mis-documentos", headers=self.auth(csrf)).status_code,
+            401,
+        )
+        challenge = self.login("superadmin-test", "NewSuper123!")
+        self.assertTrue(challenge)
+
+        used = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "AnotherSuper123!",
+            },
+        )
+        self.assertEqual(used.status_code, 409)
 
     def test_ip_rate_limits_protect_public_auth_endpoints(self):
         for _ in range(10):
