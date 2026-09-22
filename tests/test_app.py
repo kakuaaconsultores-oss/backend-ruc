@@ -138,6 +138,36 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(superadmin["rol"], "superadmin")
         self.assertEqual(superadmin["usuario"], "superadmin-test")
 
+    def test_bootstrap_normalizes_historical_placeholder_username(self):
+        conn = get_db()
+        conn.execute("UPDATE usuarios SET usuario='el usuario que quieras conservar/crear' WHERE rol='superadmin'")
+        conn.execute("UPDATE superadmin_bootstrap SET usado=0, usado_en=NULL WHERE id=1")
+        conn.commit()
+        conn.close()
+
+        response = self.client.post(
+            "/api/superadmin/bootstrap",
+            json={
+                "bootstrap_secret": os.environ["SUPERADMIN_BOOTSTRAP_SECRET"],
+                "nueva_password": "Normalized123!",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["usuario"], "superadmin-test")
+
+        conn = get_db()
+        row = conn.execute("SELECT usuario, rol FROM usuarios WHERE rol='superadmin'").fetchone()
+        conn.close()
+        self.assertEqual(row["usuario"], "superadmin-test")
+        self.assertEqual(row["rol"], "superadmin")
+
+        login = self.client.post(
+            "/api/login", json={"usuario": "superadmin-test", "password": "Normalized123!"}
+        )
+        self.assertEqual(login.status_code, 200, login.get_json())
+        self.assertTrue(login.get_json()["requiere_otp"])
+        self.assertEqual(login.get_json()["codigo"], "1234")
+
     def test_superadmin_bootstrap_is_one_time_and_invalidates_sessions(self):
         csrf = self.verify(self.login("superadmin-test", "Super123!"))
 
