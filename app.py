@@ -765,41 +765,7 @@ def editar_usuario(usuario_id):
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
-# Admin: resetear contraseña manual (fuerza cambio, invalida token viejo)
-@app.route("/api/admin/usuarios/<int:usuario_id>/reset-password", methods=["POST"])
-@staff_required
-def resetear_password(usuario_id):
-    data = request.get_json() or {}
-    nueva_password = data.get("nueva_password", "")
-    error_password = validar_politica_password(nueva_password)
-    if error_password:
-        return jsonify({"error": error_password}), 400
-    conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
-    if not u:
-        conn.close()
-        return jsonify({"error": "Usuario no encontrado"}), 404
-    u_actual = obtener_usuario_por_token()
-    if u["rol"] == "superadmin" or not puede_gestionar(u_actual["rol"], u["rol"]):
-        conn.close()
-        return jsonify({"error": "No tenés permisos para resetear este usuario."}), 403
-    hashed = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL, debe_cambiar = 1 WHERE id = ?", (hashed, usuario_id))
-    conn.commit()
-    conn.close()
-    if u["correo"]:
-        cuerpo = f"""
-        <h2>Kakuaa Consultores</h2>
-        <p>Hola <strong>{html.escape(str(u["nombre"]))}</strong>,</p>
-        <p>Tu contraseña fue restablecida por el administrador.</p>
-        <p><strong>Tu nueva contraseña es:</strong> <code>{html.escape(nueva_password)}</code></p>
-        <p>Al ingresar, el sistema te pedirá que la cambies por una nueva.</p>
-        <p>Saludos,<br>Equipo Kakuaa Consultores</p>
-        """
-        enviar_correo(u["correo"], "Tu contraseña fue restablecida", cuerpo)
-    return jsonify({"ok": True, "message": "Contraseña actualizada y correo enviado"})
-
-# Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
+# La recuperación administrativa usa exclusivamente tickets + enlaces de un solo uso.\n# No se permite establecer ni enviar contraseñas manualmente desde el panel.\n\n# Admin: cambiar estado (habilitar/deshabilitar, invalida token si deshabilitas)
 @app.route("/api/admin/usuarios/<int:usuario_id>/estado", methods=["PUT"])
 @staff_required
 def cambiar_estado(usuario_id):
