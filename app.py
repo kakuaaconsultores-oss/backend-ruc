@@ -36,6 +36,7 @@ RATE_LIMITS = {
     "resend_otp": 6,
     "request_reset": 5,
     "reset_password": 5,
+    "change_password": 5,
 }
 
 app = Flask(__name__)
@@ -465,16 +466,24 @@ def reenviar_otp():
 @usuario_required
 def cambiar_password():
     u = obtener_usuario_por_token()
+    conn = get_db()
+    if rate_limit_exceeded(conn, "change_password"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}
+    password_actual = data.get("password_actual", "")
     nueva_password = data.get("nueva_password", "")
+
+    if not password_actual or not check_password(password_actual, u["password_hash"]):
+        conn.close()
+        return jsonify({"error": "La contraseña actual es incorrecta."}), 401
 
     error = validar_politica_password(nueva_password)
     if error:
         return jsonify({"error": error}), 400
 
     nuevo_hash = hash_password(nueva_password)
-    conn = get_db()
-    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, reset_token_hash = NULL, reset_expira_en = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"])
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
