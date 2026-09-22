@@ -195,51 +195,74 @@ def healthz():
 
 # Login con límite de intentos y token de sesión
 @app.route("/api/login", methods=["POST"])
-return jsonify({"ok": True, "token": token, "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"], "rol": u["rol"]}})
 def login():
     data = request.get_json() or {}
-    ruc = data.get("ruc", "").strip()
+    usuario_login = data.get("usuario", "").strip()
     password = data.get("password", "")
+    if not usuario_login or not password:
+        return jsonify({"error": "Ingresá tu usuario y contraseña"}), 400
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
+    u = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario_login,)).fetchone()
     if not u:
-        return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
+        conn.close(); return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
     if not u["activo"]:
-        return jsonify({"error": "Usuario deshabilitado"}), 403
+        conn.close(); return jsonify({"error": "Usuario deshabilitado"}), 403
     if u["bloqueo_hasta"]:
         bloqueo = datetime.fromisoformat(u["bloqueo_hasta"])
         if datetime.utcnow() < bloqueo:
-            restante = (bloqueo - datetime.utcnow()).seconds // 60
-            return jsonify({"error": f"Demasiados intentos. Esperá {restante} minutos o usá '¿Olvidó su contraseña?'", "bloqueado": True}), 429
-        else:
-            conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (u["id"],))
-            conn.commit()
-    if check_password(password, u["password_hash"]):
-        token = generar_token()
-        conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL, token_sesion = ? WHERE id = ?", (token, u["id"]))
-        conn.commit()
-        conn.close()
-        # Devuelve debe_cambiar para que el frontend redirija si es necesario
-        return jsonify({
-            "ok": True,
-            "token": token,
-            "debe_cambiar": bool(u["debe_cambiar"]),
-            "usuario": {"id": u["id"], "ruc": u["ruc"], "nombre": u["nombre"], "correo": u["correo"]}
-        })
-    else:
+            restante = max(1, int((bloqueo - datetime.utcnow()).total_seconds() // 60) + 1)
+            conn.close(); return jsonify({"error": f"Acceso bloqueado temporalmente. Intentá nuevamente en {restante} minutos.", "bloqueado": True}), 429
+        conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (u["id"],)); conn.commit()
+    if not check_password(password, u["password_hash"]):
         intentos = u["intentos_fallidos"] + 1
         if intentos >= MAX_INTENTOS:
-            bloqueo_hasta = (datetime.utcnow() + timedelta(minutes=BLOQUEO_MINUTOS)).isoformat()
-            conn.execute("UPDATE usuarios SET intentos_fallidos = ?, bloqueo_hasta = ? WHERE id = ?", (0, bloqueo_hasta, u["id"]))
-            conn.commit()
-            conn.close()
-            return jsonify({"error": f"Demasiados intentos. Esperá {BLOQUEO_MINUTOS} minutos o usá '¿Olvidó su contraseña?'", "bloqueado": True}), 429
-        else:
-            conn.execute("UPDATE usuarios SET intentos_fallidos = ? WHERE id = ?", (intentos, u["id"]))
-            conn.commit()
-            conn.close()
-            return jsonify({"error": "Usuario o contraseña incorrectos", "intentos_restantes": MAX_INTENTOS - intentos}), 401
+            bloqueo_hasta = datetime.utcnow() + timedelta(minutes=BLOQUEO_MINUTOS)
+            conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = ? WHERE id = ?", (bloqueo_hasta.isoformat(), u["id"])); conn.commit(); conn.close()
+            return jsonify({"error": f"Demasiados intentos. Esperá {BLOQUEO_MINUTOS} minutos.", "bloqueado": True}), 429
+        conn.execute("UPDATE usuarios SET intentos_fallidos = ? WHERE id = ?", (intentos, u["id"])); conn.commit(); conn.close()
+        restantes = MAX_INTENTOS - intentos
+        return jsonify({"error": f"Usuario o contraseña incorrectos. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
+    challenge, otp = crear_desafio_otp(conn, u)
+    enviado = enviar_otp(u, otp); conn.close()
+    if not enviado: return jsonify({"error": "No se pudo enviar el código de acceso. Intentá nuevamente."}), 503
+    return jsonify({"ok": True, "requiere_otp": True, "challenge": challenge, "usuario": {"id": u["id"], "usuario": u["usuario"], "nombre": u["nombre"], "correo": u["correo"], "rol": u["rol"]}})
 
+@app.route("/api/login/verify-otp", methods=["POST"])
+def verificar_otp():
+    data = request.get_json() or {}
+    challenge = data.get("challenge", "").strip(); otp = data.get("otp", "").strip()
+    if not challenge or len(otp) != 4 or not otp.isdigit(): return jsonify({"error": "Ingresá el código de 4 dígitos."}), 400
+    conn = get_db()
+    row = conn.execute("SELECT o.*, u.activo, u.nombre, u.usuario, u.correo, u.ruc, u.rol FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
+    if not row: conn.close(); return jsonify({"error": "El código ya no es válido. Solicitá uno nuevo."}), 401
+    if datetime.utcnow() >= datetime.fromisoformat(row["expira_en"]):
+        conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],)); conn.commit(); conn.close(); return jsonify({"error": "El código venció. Solicitá uno nuevo.", "vencido": True}), 401
+    if not row["activo"]: conn.close(); return jsonify({"error": "Usuario deshabilitado"}), 403
+    if not check_password(otp, row["otp_hash"]):
+        intentos = row["intentos"] + 1
+        if intentos >= MAX_INTENTOS:
+            bloqueo_hasta = datetime.utcnow() + timedelta(minutes=BLOQUEO_MINUTOS)
+            conn.execute("UPDATE usuarios SET intentos_fallidos = 0, bloqueo_hasta = ? WHERE id = ?", (bloqueo_hasta.isoformat(), row["usuario_id"]))
+            conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],)); conn.commit(); conn.close()
+            return jsonify({"error": f"Demasiados códigos incorrectos. Esperá {BLOQUEO_MINUTOS} minutos.", "bloqueado": True}), 429
+        conn.execute("UPDATE login_otp SET intentos = ? WHERE id = ?", (intentos, row["id"])); conn.commit(); conn.close()
+        restantes = MAX_INTENTOS - intentos
+        return jsonify({"error": f"Código incorrecto. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
+    token = generar_token()
+    conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],))
+    conn.execute("UPDATE usuarios SET token_sesion = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (token, row["usuario_id"]))
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "token": token, "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
+
+@app.route("/api/login/resend-otp", methods=["POST"])
+def reenviar_otp():
+    data = request.get_json() or {}; challenge = data.get("challenge", "").strip()
+    if not challenge: return jsonify({"error": "Desafío inválido"}), 400
+    conn = get_db(); row = conn.execute("SELECT u.* FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
+    if not row: conn.close(); return jsonify({"error": "La sesión de verificación ya no es válida. Volvé a iniciar sesión."}), 401
+    new_challenge, otp = crear_desafio_otp(conn, row); enviado = enviar_otp(row, otp); conn.close()
+    if not enviado: return jsonify({"error": "No se pudo enviar el nuevo código."}), 503
+    return jsonify({"ok": True, "challenge": new_challenge, "message": "Se envió un nuevo código. El anterior quedó invalidado."})
 # Cambiar contraseña (obligatorio en primer ingreso o tras reset admin)
 @app.route("/api/cambiar-password", methods=["POST"])
 @usuario_required
