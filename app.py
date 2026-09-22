@@ -240,33 +240,35 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         return False
 
 def obtener_usuario_por_token():
-    """Obtiene el usuario autenticado y valida la expiración de su sesión."""
-    auth = request.headers.get("Authorization", "")
-    token = auth.replace("Bearer ", "").strip()
-    if not token:
-        return None
+    """Obtiene el usuario autenticado exclusivamente desde la cookie HttpOnly de sesión."""
+    token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if not token: return None
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion_hash = ? OR token_sesion = ?", (hash_token(token), token)).fetchone()
-    if not u or not u["activo"]:
-        conn.close()
-        return None
-    if u["token_sesion"]:
-        conn.execute("UPDATE usuarios SET token_sesion_hash = ?, token_sesion = NULL WHERE id = ?", (hash_token(token), u["id"]))
-        conn.commit()
+    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion_hash = ?", (hash_token(token),)).fetchone()
+    if not u or not u["activo"]: conn.close(); return None
     if u["token_expira_en"]:
         try:
             if datetime.utcnow() >= datetime.fromisoformat(u["token_expira_en"]):
-                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
-                conn.commit()
-                conn.close()
-                return None
+                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+                conn.commit(); conn.close(); return None
         except ValueError:
-            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
-            conn.commit()
-            conn.close()
-            return None
-    conn.close()
-    return u
+            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+            conn.commit(); conn.close(); return None
+    conn.close(); return u
+
+def csrf_valido():
+    token = request.headers.get(CSRF_HEADER_NAME, "")
+    if not token: return False
+    u = obtener_usuario_por_token()
+    return bool(u and u["csrf_token_hash"] and secrets.compare_digest(u["csrf_token_hash"], hash_token(token)))
+
+def csrf_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not csrf_valido():
+            return jsonify({"error": "Token CSRF inválido o ausente."}), 403
+        return f(*args, **kwargs)
+    return wrapper
 
 ROLES = ['superadmin', 'admin', 'operativo', 'contribuyente']
 
@@ -287,6 +289,8 @@ def admin_required(f):
         u = obtener_usuario_por_token()
         if not u or u["rol"] not in ("superadmin", "admin"):
             return jsonify({"error": "No autorizado"}), 401
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not csrf_valido():
+            return jsonify({"error": "Token CSRF inválido o ausente."}), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -297,6 +301,8 @@ def staff_required(f):
         u = obtener_usuario_por_token()
         if not u or u["rol"] not in ("superadmin", "admin", "operativo"):
             return jsonify({"error": "No autorizado"}), 401
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not csrf_valido():
+            return jsonify({"error": "Token CSRF inválido o ausente."}), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -433,11 +439,14 @@ def verificar_otp():
         restantes = MAX_INTENTOS - intentos
         return jsonify({"error": f"Código incorrecto. Te quedan {restantes} intentos.", "intentos_restantes": restantes}), 401
     token = generar_token()
+    csrf_token = secrets.token_urlsafe(32)
     conn.execute("DELETE FROM login_otp WHERE id = ?", (row["id"],))
     token_expira = datetime.utcnow() + timedelta(hours=SESION_HORAS)
-    conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hash_token(token), token_expira.isoformat(), row["usuario_id"]))
+    conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = ?, csrf_token_hash = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hash_token(token), hash_token(csrf_token), token_expira.isoformat(), row["usuario_id"]))
     conn.commit(); conn.close()
-    return jsonify({"ok": True, "token": token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
+    response = jsonify({"ok": True, "csrf_token": csrf_token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
+    response.set_cookie(SESSION_COOKIE_NAME, token, max_age=SESION_HORAS * 3600, secure=COOKIE_SECURE, httponly=True, samesite=COOKIE_SAMESITE, path="/")
+    return response
 
 @app.route("/api/login/resend-otp", methods=["POST"])
 def reenviar_otp():
@@ -464,6 +473,7 @@ def reenviar_otp():
 # Cambiar contraseña (obligatorio en primer ingreso o tras reset admin)
 @app.route("/api/cambiar-password", methods=["POST"])
 @usuario_required
+@csrf_required
 def cambiar_password():
     u = obtener_usuario_por_token()
     conn = get_db()
@@ -484,21 +494,23 @@ def cambiar_password():
         return jsonify({"error": error}), 400
 
     nuevo_hash = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, reset_token_hash = NULL, reset_expira_en = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, reset_token_hash = NULL, reset_expira_en = NULL, token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
 
 # Logout (invalida el token)
 @app.route("/api/logout", methods=["POST"])
+@csrf_required
 def logout():
     u = obtener_usuario_por_token()
     if u:
         conn = get_db()
-        conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
-        conn.commit()
-        conn.close()
-    return jsonify({"ok": True})
+        conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
+        conn.commit(); conn.close()
+    response = jsonify({"ok": True})
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE)
+    return response
 
 # Solicitar reset (crea ticket)
 @app.route("/api/solicitar-reset", methods=["POST"])
