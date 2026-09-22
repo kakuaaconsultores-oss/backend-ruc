@@ -28,6 +28,10 @@ RESET_TOKEN_HORAS = 1
 MAX_UPLOAD_MB = 16
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
 MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+SESSION_COOKIE_NAME = "__Host-kakuaa_session"
+CSRF_HEADER_NAME = "X-CSRF-Token"
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") == "1"
+COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "None")
 
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMITS = {
@@ -46,7 +50,7 @@ CORS_ORIGINS = [o.strip() for o in os.environ.get(
     "CORS_ORIGINS",
     "https://kakuaaconsultores-oss.github.io,http://localhost:5500,http://127.0.0.1:5500"
 ).split(",") if o.strip()]
-CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}}, supports_credentials=False, expose_headers=["Content-Disposition"])
+CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}}, supports_credentials=True, expose_headers=["Content-Disposition"])
 
 # Configuración SMTP (se lee de variables de entorno de Render)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -94,6 +98,7 @@ def init_db():
         ("debe_cambiar", "INTEGER DEFAULT 0"),
         ("token_expira_en", "TEXT DEFAULT NULL"),
         ("token_sesion_hash", "TEXT DEFAULT NULL"),
+        ("csrf_token_hash", "TEXT DEFAULT NULL"),
         ("reset_token_hash", "TEXT DEFAULT NULL"),
         ("reset_expira_en", "TEXT DEFAULT NULL")
     ]:
