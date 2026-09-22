@@ -13,6 +13,7 @@ import bcrypt
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "usuarios.db"))
@@ -28,7 +29,17 @@ MAX_UPLOAD_MB = 16
 ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "webp", "doc", "docx", "xls", "xlsx", "csv"}
 MAX_CONTENT_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMITS = {
+    "login": 10,
+    "verify_otp": 10,
+    "resend_otp": 6,
+    "request_reset": 5,
+    "reset_password": 5,
+}
+
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_BYTES
 CORS_ORIGINS = [o.strip() for o in os.environ.get(
     "CORS_ORIGINS",
@@ -52,6 +63,13 @@ def get_db():
     return conn
 def init_db():
     conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS rate_limit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        creado_en REAL NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_events ON rate_limit_events(ip, endpoint, creado_en)")
     conn.execute("""CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ruc TEXT UNIQUE NOT NULL,
@@ -315,6 +333,37 @@ def crear_desafio_otp(conn, usuario, generaciones=1):
     conn.commit()
     return challenge, otp, generaciones
 
+# ---------- Protección anti-abuso ----------
+def client_ip():
+    return request.remote_addr or "unknown"
+
+def rate_limit_exceeded(conn, endpoint):
+    """Registra la solicitud y devuelve True si supera el límite por IP."""
+    limit = RATE_LIMITS[endpoint]
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    ip = client_ip()
+    conn.execute("DELETE FROM rate_limit_events WHERE creado_en < ?", (window_start,))
+    count = conn.execute(
+        "SELECT COUNT(*) AS total FROM rate_limit_events WHERE ip = ? AND endpoint = ? AND creado_en >= ?",
+        (ip, endpoint, window_start)
+    ).fetchone()["total"]
+    if count >= limit:
+        conn.commit()
+        return True
+    conn.execute(
+        "INSERT INTO rate_limit_events (ip, endpoint, creado_en) VALUES (?, ?, ?)",
+        (ip, endpoint, now)
+    )
+    conn.commit()
+    return False
+
+def rate_limit_response():
+    return jsonify({
+        "error": "Demasiadas solicitudes. Esperá un momento e intentá nuevamente.",
+        "rate_limited": True
+    }), 429
+
 # ---------- RUTAS ----------
 
 @app.route("/healthz")
@@ -324,12 +373,15 @@ def healthz():
 # Login con límite de intentos y token de sesión
 @app.route("/api/login", methods=["POST"])
 def login():
+    conn = get_db()
+    if rate_limit_exceeded(conn, "login"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}
     usuario_login = data.get("usuario", "").strip()
     password = data.get("password", "")
     if not usuario_login or not password:
         return jsonify({"error": "Ingresá tu usuario y contraseña"}), 400
-    conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario_login,)).fetchone()
     if not u:
         conn.close(); return jsonify({"error": "Usuario o contraseña incorrectos"}), 401
@@ -357,10 +409,13 @@ def login():
 
 @app.route("/api/login/verify-otp", methods=["POST"])
 def verificar_otp():
+    conn = get_db()
+    if rate_limit_exceeded(conn, "verify_otp"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}
     challenge = data.get("challenge", "").strip(); otp = data.get("otp", "").strip()
     if not challenge or len(otp) != 4 or not otp.isdigit(): return jsonify({"error": "Ingresá el código de 4 dígitos."}), 400
-    conn = get_db()
     row = conn.execute("SELECT o.*, u.activo, u.nombre, u.usuario, u.correo, u.ruc, u.rol, u.debe_cambiar FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
     if not row: conn.close(); return jsonify({"error": "El código ya no es válido. Solicitá uno nuevo."}), 401
     if datetime.utcnow() >= datetime.fromisoformat(row["expira_en"]):
@@ -385,9 +440,13 @@ def verificar_otp():
 
 @app.route("/api/login/resend-otp", methods=["POST"])
 def reenviar_otp():
+    conn = get_db()
+    if rate_limit_exceeded(conn, "resend_otp"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}; challenge = data.get("challenge", "").strip()
     if not challenge: return jsonify({"error": "Desafío inválido"}), 400
-    conn = get_db(); row = conn.execute("SELECT u.* FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
+    row = conn.execute("SELECT u.* FROM login_otp o JOIN usuarios u ON u.id = o.usuario_id WHERE o.challenge_token = ?", (challenge,)).fetchone()
     if not row: conn.close(); return jsonify({"error": "La sesión de verificación ya no es válida. Volvé a iniciar sesión."}), 401
     current = conn.execute("SELECT generaciones FROM login_otp WHERE challenge_token = ?", (challenge,)).fetchone()
     generaciones = int(current["generaciones"] or 1)
@@ -434,11 +493,14 @@ def logout():
 # Solicitar reset (crea ticket)
 @app.route("/api/solicitar-reset", methods=["POST"])
 def solicitar_reset():
+    conn = get_db()
+    if rate_limit_exceeded(conn, "request_reset"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}
     ruc = data.get("ruc", "").strip()
     if not ruc:
         return jsonify({"error": "Ingresá tu RUC"}), 400
-    conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE ruc = ?", (ruc,)).fetchone()
     if u:
         pendiente = conn.execute(
@@ -521,6 +583,10 @@ def aprobar_ticket(ticket_id):
 # Restablecer contraseña mediante token de un solo uso
 @app.route("/api/restablecer-password", methods=["POST"])
 def restablecer_password():
+    conn = get_db()
+    if rate_limit_exceeded(conn, "reset_password"):
+        conn.close()
+        return rate_limit_response()
     data = request.get_json() or {}
     token = data.get("token", "").strip()
     nueva_password = data.get("nueva_password", "")
@@ -532,7 +598,6 @@ def restablecer_password():
     error_password = validar_politica_password(nueva_password)
     if error_password:
         return jsonify({"error": error_password}), 400
-    conn = get_db()
     u = conn.execute(
         "SELECT * FROM usuarios WHERE reset_token_hash = ? AND reset_expira_en IS NOT NULL",
         (hash_token(token),)
