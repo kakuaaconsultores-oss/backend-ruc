@@ -480,10 +480,11 @@ def cambiar_password():
 
     error = validar_politica_password(nueva_password)
     if error:
+        conn.close()
         return jsonify({"error": error}), 400
 
     nuevo_hash = hash_password(nueva_password)
-    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, reset_token_hash = NULL, reset_expira_en = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"])
+    conn.execute("UPDATE usuarios SET password_hash = ?, debe_cambiar = 0, reset_token_hash = NULL, reset_expira_en = NULL, token_sesion = NULL, token_sesion_hash = NULL, token_expira_en = NULL WHERE id = ?", (nuevo_hash, u["id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
