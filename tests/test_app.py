@@ -167,29 +167,32 @@ class KakuaaApiTests(unittest.TestCase):
         admin_id = self.add_user("admin1", "admin")
         operativo_id = self.add_user("operativo1", "operativo")
         contrib_id = self.add_user("contrib1", "contribuyente")
-        admin_csrf = self.verify(self.login("admin1"))
-        operativo_csrf = self.verify(self.login("operativo1"))
-        contrib_csrf = self.verify(self.login("contrib1"))
+
+        def session_for(usuario):
+            client = app.test_client()
+            challenge = client.post("/api/login", json={"usuario": usuario, "password": "Test123!"}).get_json()["challenge"]
+            response = client.post("/api/login/verify-otp", json={"challenge": challenge, "otp": "1234"})
+            self.assertEqual(response.status_code, 200)
+            return client, response.get_json()["csrf_token"]
+
+        admin_client, admin_csrf = session_for("admin1")
+        operativo_client, operativo_csrf = session_for("operativo1")
+        contrib_client, contrib_csrf = session_for("contrib1")
 
         # Operativo puede gestionar contribuyentes, pero no administradores/operativos.
-        denied_admin = self.client.get(f"/api/admin/usuarios/{admin_id}/documentos", headers=self.auth(operativo_csrf))
+        denied_admin = operativo_client.get(f"/api/admin/usuarios/{admin_id}/documentos", headers=self.auth(operativo_csrf))
         self.assertEqual(denied_admin.status_code, 403)
-        promote_operativo = self.client.put(
-            f"/api/admin/usuarios/{contrib_id}/rol",
-            headers=self.auth(operativo_csrf),
-            json={"rol": "operativo"},
+        promote_operativo = operativo_client.put(
+            f"/api/admin/usuarios/{contrib_id}/rol", headers=self.auth(operativo_csrf), json={"rol": "operativo"}
         )
         self.assertEqual(promote_operativo.status_code, 403)
 
-        # Contribuyente no puede consultar ni mutar el módulo administrativo.
-        self.assertEqual(self.client.get("/api/admin/usuarios", headers=self.auth(contrib_csrf)).status_code, 401)
-        self.assertEqual(self.client.get("/api/admin/usuarios", headers=self.auth(contrib_csrf)).status_code, 401)
+        # Contribuyente no puede acceder al módulo administrativo.
+        self.assertEqual(contrib_client.get("/api/admin/usuarios", headers=self.auth(contrib_csrf)).status_code, 401)
 
         # Admin puede promover un contribuyente a operativo.
-        promote = self.client.put(
-            f"/api/admin/usuarios/{contrib_id}/rol",
-            headers=self.auth(admin_csrf),
-            json={"rol": "operativo"},
+        promote = admin_client.put(
+            f"/api/admin/usuarios/{contrib_id}/rol", headers=self.auth(admin_csrf), json={"rol": "operativo"}
         )
         self.assertEqual(promote.status_code, 200)
 
@@ -200,18 +203,15 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertIsNone(row["token_sesion_hash"])
 
         # Admin no puede crear otro admin.
-        create_admin = self.client.post(
-            "/api/admin/usuarios",
-            headers=self.auth(admin_csrf),
+        create_admin = admin_client.post(
+            "/api/admin/usuarios", headers=self.auth(admin_csrf),
             json={"ruc": "new-admin", "correo": "new-admin@test.local", "nombre": "Nuevo", "usuario": "newadmin", "contrasena": "Test123!", "rol": "admin"},
         )
         self.assertEqual(create_admin.status_code, 403)
 
         # SUPERADMIN no puede ser modificado mediante cambio de rol.
-        superadmin = self.client.put(
-            f"/api/admin/usuarios/{self.superadmin_id}/rol",
-            headers=self.auth(admin_csrf),
-            json={"rol": "operativo"},
+        superadmin = admin_client.put(
+            f"/api/admin/usuarios/{self.superadmin_id}/rol", headers=self.auth(admin_csrf), json={"rol": "operativo"}
         )
         self.assertEqual(superadmin.status_code, 403)
 
