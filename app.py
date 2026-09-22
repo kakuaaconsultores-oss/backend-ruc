@@ -102,9 +102,25 @@ def _migrar_almacenamiento_persistente(base_dir=None, persistent_dir=None):
 
 _migrar_almacenamiento_persistente()
 
-# DB_PATH/DOCS_DIR explícitos tienen prioridad sobre PERSISTENT_DATA_DIR.
-DB_PATH = os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db"))
-DOCS_DIR = os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR, "documentos"))
+# La base y los documentos deben vivir en el almacenamiento persistente cuando
+# Render proporciona PERSISTENT_DATA_DIR. Evitamos que una variable antigua
+# DB_PATH/DOCS_DIR haga que un deploy vuelva accidentalmente al filesystem efímero.
+DB_PATH = os.path.abspath(os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db")))
+DOCS_DIR = os.path.abspath(os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR, "documentos")))
+
+if os.path.abspath(PERSISTENT_DATA_DIR) != os.path.abspath(BASE_DIR):
+    persistent_real = os.path.realpath(PERSISTENT_DATA_DIR)
+    db_real_parent = os.path.realpath(os.path.dirname(DB_PATH))
+    docs_real = os.path.realpath(DOCS_DIR)
+    if os.path.commonpath([persistent_real, db_real_parent]) != persistent_real:
+        raise RuntimeError(
+            f"DB_PATH debe estar dentro de PERSISTENT_DATA_DIR en producción: {DB_PATH}"
+        )
+    if os.path.commonpath([persistent_real, docs_real]) != persistent_real:
+        raise RuntimeError(
+            f"DOCS_DIR debe estar dentro de PERSISTENT_DATA_DIR en producción: {DOCS_DIR}"
+        )
+
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(DOCS_DIR, exist_ok=True)
 
@@ -571,40 +587,6 @@ def rate_limit_response():
     }), 429
 
 # ---------- RUTAS ----------
-
-@app.route("/api/superadmin/storage-diagnostic", methods=["POST"])
-def superadmin_storage_diagnostic():
-    """Diagnóstico temporal y protegido del almacenamiento de producción."""
-    provided = str((request.get_json(silent=True) or {}).get("bootstrap_secret", "")).strip()
-    expected = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
-    if not expected or len(expected) < 32 or not provided or not secrets.compare_digest(
-        provided.encode("utf-8"), expected.encode("utf-8")
-    ):
-        return jsonify({"error": "Credencial inválida."}), 403
-
-    conn = get_db()
-    try:
-        db_exists = os.path.exists(DB_PATH)
-        persistent_exists = os.path.isdir(PERSISTENT_DATA_DIR)
-        superadmins = conn.execute(
-            "SELECT id, usuario, rol, activo, debe_cambiar FROM usuarios WHERE rol = 'superadmin' ORDER BY id"
-        ).fetchall()
-        bootstrap = conn.execute(
-            "SELECT usado, usado_en FROM superadmin_bootstrap WHERE id = 1"
-        ).fetchone()
-        usuarios_total = conn.execute("SELECT COUNT(*) AS total FROM usuarios").fetchone()["total"]
-        return jsonify({
-            "ok": True,
-            "db_path": DB_PATH,
-            "db_exists": db_exists,
-            "persistent_data_dir": PERSISTENT_DATA_DIR,
-            "persistent_dir_exists": persistent_exists,
-            "usuarios_total": usuarios_total,
-            "superadmins": [dict(row) for row in superadmins],
-            "bootstrap": dict(bootstrap) if bootstrap else None,
-        })
-    finally:
-        conn.close()
 
 @app.route("/healthz")
 def healthz():
