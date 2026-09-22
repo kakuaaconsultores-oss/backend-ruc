@@ -425,7 +425,7 @@ class KakuaaApiTests(unittest.TestCase):
         conn.execute("UPDATE documentos SET ruta=? WHERE id=?", (outside, doc["id"]))
         conn.commit()
         conn.close()
-        blocked = self.client.get(
+        blocked = user_a_client.get(
             f"/api/mis-documentos/{doc['id']}/descargar",
             headers=self.auth(user_a_token),
         )
