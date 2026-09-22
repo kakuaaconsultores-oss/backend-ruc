@@ -42,6 +42,7 @@ RATE_LIMITS = {
     "reset_password": 5,
     "change_password": 5,
     "superadmin_bootstrap": 5,
+    "superadmin_diagnostic": 5,
 }
 
 app = Flask(__name__)
@@ -391,6 +392,48 @@ def rate_limit_response():
 @app.route("/healthz")
 def healthz():
     return jsonify({"status": "ok"})
+
+@app.route("/api/superadmin/bootstrap-diagnostic", methods=["POST"])
+def superadmin_bootstrap_diagnostic():
+    """
+    Diagnóstico temporal y no destructivo del estado de la cuenta SUPERADMIN.
+    Requiere el mismo secreto de bootstrap, pero nunca devuelve ni registra
+    secretos, contraseñas, hashes ni otros datos sensibles.
+    """
+    conn = get_db()
+    if rate_limit_exceeded(conn, "superadmin_diagnostic"):
+        conn.close()
+        return rate_limit_response()
+
+    bootstrap_secret = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
+    if not bootstrap_secret or len(bootstrap_secret) < 32:
+        conn.close()
+        return jsonify({"error": "Diagnóstico no habilitado."}), 503
+
+    data = request.get_json(silent=True) or {}
+    provided_secret = str(data.get("bootstrap_secret", "")).strip()
+    if not provided_secret or not secrets.compare_digest(
+        provided_secret.encode("utf-8"), bootstrap_secret.encode("utf-8")
+    ):
+        conn.close()
+        return jsonify({"error": "Credencial inválida."}), 403
+
+    sa = conn.execute(
+        "SELECT usuario, rol, activo FROM usuarios WHERE rol = 'superadmin' LIMIT 1"
+    ).fetchone()
+    estado = conn.execute(
+        "SELECT usado FROM superadmin_bootstrap WHERE id = 1"
+    ).fetchone()
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "superadmin_existe": bool(sa),
+        "usuario": sa["usuario"] if sa else None,
+        "rol": sa["rol"] if sa else None,
+        "activo": bool(sa["activo"]) if sa else None,
+        "bootstrap_usado": bool(estado["usado"]) if estado else None,
+    })
 
 # Login con límite de intentos y token de sesión
 @app.route("/api/superadmin/bootstrap", methods=["POST"])
