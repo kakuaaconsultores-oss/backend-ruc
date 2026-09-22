@@ -121,6 +121,16 @@ if os.path.abspath(PERSISTENT_DATA_DIR) != os.path.abspath(BASE_DIR):
             f"DOCS_DIR debe estar dentro de PERSISTENT_DATA_DIR en producción: {DOCS_DIR}"
         )
 
+# En Render, /var/data es el Persistent Disk. Si la base desaparece, detenemos el servicio
+# en vez de crear silenciosamente una base SQLite nueva y "perder" los usuarios.
+# La inicialización manual se puede habilitar explícitamente con ALLOW_EMPTY_PERSISTENT_STORAGE=1.
+if os.path.abspath(PERSISTENT_DATA_DIR) == os.path.abspath("/var/data") and not os.path.exists(DB_PATH):
+    if os.environ.get("ALLOW_EMPTY_PERSISTENT_STORAGE", "0") != "1":
+        raise RuntimeError(
+            f"No se encontró la base persistente en {DB_PATH}. "
+            "Se evita crear una base vacía para proteger los datos existentes."
+        )
+
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(DOCS_DIR, exist_ok=True)
 
