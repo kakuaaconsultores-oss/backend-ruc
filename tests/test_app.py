@@ -22,7 +22,12 @@ class KakuaaApiTests(unittest.TestCase):
         import app as module
         module.generar_otp = lambda: cls.otp
         module.enviar_otp = lambda usuario, otp: True
-        module.enviar_correo = lambda *args, **kwargs: True
+        module.enviar_correo = lambda *args, **kwargs: cls._capture_email(*args, **kwargs)
+
+    @classmethod
+    def _capture_email(cls, *args, **kwargs):
+        cls.last_email = args
+        return True
 
     def setUp(self):
         conn = get_db()
@@ -36,6 +41,7 @@ class KakuaaApiTests(unittest.TestCase):
                         debe_cambiar=0, activo=1
                         WHERE rol='superadmin'""")
         conn.commit()
+        self.__class__.last_email = ()
         self.superadmin_id = conn.execute(
             "SELECT id FROM usuarios WHERE rol='superadmin'"
         ).fetchone()["id"]
@@ -485,4 +491,34 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertIsNone(row["nueva_password"])
         self.assertTrue(user["reset_token_hash"])
         self.assertTrue(user["reset_expira_en"])
+        self.assertTrue(self.last_email)
+        cuerpo = self.last_email[2]
+        import re
+        match = re.search(r"restablecer-password\\.html\\?token=([^\"<]+)", cuerpo)
+        self.assertIsNotNone(match)
+        reset_token = match.group(1)
+
+        response = self.client.post(
+            "/api/restablecer-password",
+            json={"token": reset_token, "nueva_password": "Reset123!", "confirmar_password": "Reset123!"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        conn = get_db()
+        user = conn.execute(
+            "SELECT reset_token_hash, reset_expira_en, debe_cambiar FROM usuarios WHERE usuario = ?",
+            ("recover-approved",),
+        ).fetchone()
+        conn.close()
+        self.assertIsNone(user["reset_token_hash"])
+        self.assertIsNone(user["reset_expira_en"])
         self.assertEqual(user["debe_cambiar"], 0)
+
+        reused = self.client.post(
+            "/api/restablecer-password",
+            json={"token": reset_token, "nueva_password": "Another123!", "confirmar_password": "Another123!"},
+        )
+        self.assertEqual(reused.status_code, 400)
+
+        challenge = self.login("recover-approved", "Reset123!")
+        self.assertTrue(challenge)
