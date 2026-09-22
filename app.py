@@ -390,7 +390,16 @@ def healthz():
     return jsonify({"status": "ok"})
 
 # Login con límite de intentos y token de sesión
-@app.route("/api/superadmin/bootstrap-status", methods=["GET"])\ndef superadmin_bootstrap_status():\n    """Diagnóstico temporal: no expone el secreto, solo su presencia y longitud."""\n    secreto = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()\n    return jsonify({\n        "configurado": bool(secreto),\n        "longitud": len(secreto),\n    })\n\n@app.route("/api/superadmin/bootstrap", methods=["POST"])
+@app.route("/api/superadmin/bootstrap-status", methods=["GET"])
+def superadmin_bootstrap_status():
+    """Diagnóstico temporal: no expone el secreto, solo su presencia y longitud."""
+    secreto = os.environ.get("SUPERADMIN_BOOTSTRAP_SECRET", "").strip()
+    return jsonify({
+        "configurado": bool(secreto),
+        "longitud": len(secreto),
+    })
+
+@app.route("/api/superadmin/bootstrap", methods=["POST"])
 def superadmin_bootstrap():
     """
     Recuperación/alta inicial del único SUPERADMIN mediante un secreto temporal
