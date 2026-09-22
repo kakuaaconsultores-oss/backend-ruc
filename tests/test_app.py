@@ -263,6 +263,24 @@ class KakuaaApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertTrue(response.get_json()["rate_limited"])
 
+    def test_login_returns_server_generated_code_and_never_sends_email(self):
+        self.add_user("visual-code")
+        response = self.client.post(
+            "/api/login", json={"usuario": "visual-code", "password": "Test123!"}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertTrue(data["requiere_otp"])
+        self.assertEqual(data["codigo"], "1234")
+        self.assertTrue(data["challenge"])
+        self.assertEqual(self.last_email, ())
+
+        verified = self.client.post(
+            "/api/login/verify-otp",
+            json={"challenge": data["challenge"], "otp": data["codigo"]},
+        )
+        self.assertEqual(verified.status_code, 200, verified.get_json())
+
     def test_login_otp_and_session(self):
         self.add_user("contrib")
         challenge = self.login("contrib")
