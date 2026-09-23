@@ -935,6 +935,27 @@ def cambiar_password():
     return jsonify({"ok": True, "message": "Contraseña actualizada correctamente. Volvé a iniciar sesión."})
 
 # Logout (invalida el token)
+@app.route("/api/sesion", methods=["GET"])
+@usuario_required
+def sesion_actual():
+    """Devuelve la identidad de la sesión activa usando la cookie HttpOnly."""
+    u = obtener_usuario_por_token()
+    if not u:
+        return jsonify({"error": "No autorizado"}), 401
+    return jsonify({
+        "ok": True,
+        "usuario": {
+            "id": u["id"],
+            "usuario": u["usuario"],
+            "ruc": u["ruc"],
+            "nombre": u["nombre"],
+            "correo": u["correo"],
+            "rol": u["rol"],
+            "debe_cambiar": bool(u["debe_cambiar"]),
+        }
+    })
+
+
 @app.route("/api/logout", methods=["POST"])
 @csrf_required
 def logout():
