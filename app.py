@@ -11,6 +11,13 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from functools import wraps
 import bcrypt
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -20,6 +27,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Render usa un filesystem efímero salvo que el servicio tenga un Persistent Disk.
 # En producción configuramos PERSISTENT_DATA_DIR=/var/data; localmente se conserva BASE_DIR.
 PERSISTENT_DATA_DIR = os.environ.get("PERSISTENT_DATA_DIR", BASE_DIR)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DB_BACKEND = "postgres" if DATABASE_URL else "sqlite"
+DB_INTEGRITY_ERROR = (sqlite3.IntegrityError, psycopg.IntegrityError) if psycopg is not None else (sqlite3.IntegrityError,)
 
 
 def _copiar_archivos_faltantes(origen, destino):
@@ -100,38 +110,29 @@ def _migrar_almacenamiento_persistente(base_dir=None, persistent_dir=None):
         print(f"[STORAGE] Almacenamiento persistente listo en {persistent_dir}")
 
 
-_migrar_almacenamiento_persistente()
+if DB_BACKEND == "sqlite":
+    _migrar_almacenamiento_persistente()
 
-# La base y los documentos deben vivir en el almacenamiento persistente cuando
-# Render proporciona PERSISTENT_DATA_DIR. Evitamos que una variable antigua
-# DB_PATH/DOCS_DIR haga que un deploy vuelva accidentalmente al filesystem efímero.
-DB_PATH = os.path.abspath(os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db")))
-DOCS_DIR = os.path.abspath(os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR, "documentos")))
+if DB_BACKEND == "sqlite":
+    DB_PATH = os.path.abspath(os.environ.get("DB_PATH", os.path.join(PERSISTENT_DATA_DIR, "usuarios.db")))
+else:
+    DB_PATH = None
 
-if os.path.abspath(PERSISTENT_DATA_DIR) != os.path.abspath(BASE_DIR):
-    persistent_real = os.path.realpath(PERSISTENT_DATA_DIR)
-    db_real_parent = os.path.realpath(os.path.dirname(DB_PATH))
-    docs_real = os.path.realpath(DOCS_DIR)
-    if os.path.commonpath([persistent_real, db_real_parent]) != persistent_real:
-        raise RuntimeError(
-            f"DB_PATH debe estar dentro de PERSISTENT_DATA_DIR en producción: {DB_PATH}"
-        )
-    if os.path.commonpath([persistent_real, docs_real]) != persistent_real:
-        raise RuntimeError(
-            f"DOCS_DIR debe estar dentro de PERSISTENT_DATA_DIR en producción: {DOCS_DIR}"
-        )
+DOCS_DIR = os.path.abspath(os.environ.get("DOCS_DIR", os.path.join(PERSISTENT_DATA_DIR if PERSISTENT_DATA_DIR != BASE_DIR else BASE_DIR, "documentos")))
 
-# En Render, /var/data es el Persistent Disk. Si la base desaparece, detenemos el servicio
-# en vez de crear silenciosamente una base SQLite nueva y "perder" los usuarios.
-# La inicialización manual se puede habilitar explícitamente con ALLOW_EMPTY_PERSISTENT_STORAGE=1.
-if os.path.abspath(PERSISTENT_DATA_DIR) == os.path.abspath("/var/data") and not os.path.exists(DB_PATH):
-    if os.environ.get("ALLOW_EMPTY_PERSISTENT_STORAGE", "0") != "1":
-        raise RuntimeError(
-            f"No se encontró la base persistente en {DB_PATH}. "
-            "Se evita crear una base vacía para proteger los datos existentes."
-        )
+if DB_BACKEND == "sqlite":
+    if os.path.abspath(PERSISTENT_DATA_DIR) != os.path.abspath(BASE_DIR):
+        persistent_real = os.path.realpath(PERSISTENT_DATA_DIR)
+        db_real_parent = os.path.realpath(os.path.dirname(DB_PATH))
+        docs_real = os.path.realpath(DOCS_DIR)
+        if os.path.commonpath([persistent_real, db_real_parent]) != persistent_real:
+            raise RuntimeError(f"DB_PATH debe estar dentro de PERSISTENT_DATA_DIR en producción: {DB_PATH}")
+        if os.path.commonpath([persistent_real, docs_real]) != persistent_real:
+            raise RuntimeError(f"DOCS_DIR debe estar dentro de PERSISTENT_DATA_DIR en producción: {DOCS_DIR}")
+    if os.path.abspath(PERSISTENT_DATA_DIR) == os.path.abspath("/var/data") and not os.path.exists(DB_PATH):
+        if os.environ.get("ALLOW_EMPTY_PERSISTENT_STORAGE", "0") != "1":
+            raise RuntimeError(f"No se encontró la base persistente en {DB_PATH}. Se evita crear una base vacía para proteger los datos existentes.")
 
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 MAX_INTENTOS = 5
@@ -177,11 +178,31 @@ SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER)
 RESET_URL_BASE = os.environ.get("RESET_URL_BASE", "https://kakuaaconsultores-oss.github.io/restablecer-password.html")
 
 # ---------- Base de datos ----------
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+def _adapt_postgres_sql(sql):
+    sql = sql.replace("?", "%s")
+    sql = sql.replace("BEGIN IMMEDIATE", "BEGIN")
+    sql = sql.replace("datetime('now')", "CURRENT_TIMESTAMP::text")
+    sql = sql.replace("date('now')", "CURRENT_DATE::text")
+    sql = sql.replace("date(s.inicio)", "CAST(s.inicio AS DATE)")
+    sql = sql.replace("date(s2.inicio)", "CAST(s2.inicio AS DATE)")
+    sql = sql.replace("COLLATE NOCASE", "")
+    sql = sql.replace("julianday(", "_julianday(")
+    return sql
+
+if DB_BACKEND == "postgres":
+    if psycopg is None:
+        raise RuntimeError("DATABASE_URL está configurado pero psycopg no está instalado.")
+    class CompatPGConnection(psycopg.Connection):
+        def execute(self, query, params=None, *, prepare=None, binary=False):
+            return super().execute(_adapt_postgres_sql(query), params, prepare=prepare, binary=binary)
+    def get_db():
+        return CompatPGConnection.connect(DATABASE_URL, row_factory=dict_row)
+else:
+    def get_db():
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.row_factory = sqlite3.Row
+        return conn
 def init_db():
     conn = get_db()
     conn.execute("""CREATE TABLE IF NOT EXISTS rate_limit_events (
@@ -398,7 +419,60 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+def init_db_postgres():
+    conn = get_db()
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS rate_limit_events (id BIGSERIAL PRIMARY KEY, ip TEXT NOT NULL, endpoint TEXT NOT NULL, creado_en DOUBLE PRECISION NOT NULL)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_events ON rate_limit_events(ip, endpoint, creado_en)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS superadmin_bootstrap (id INTEGER PRIMARY KEY, usado INTEGER NOT NULL DEFAULT 0, usado_en TEXT DEFAULT NULL)""")
+        conn.execute("INSERT INTO superadmin_bootstrap (id, usado) VALUES (1, 0) ON CONFLICT (id) DO NOTHING")
+        conn.execute("""CREATE TABLE IF NOT EXISTS usuarios (id BIGSERIAL PRIMARY KEY, ruc TEXT UNIQUE NOT NULL, correo TEXT UNIQUE NOT NULL, nombre TEXT NOT NULL, password_hash TEXT NOT NULL, activo INTEGER DEFAULT 1, intentos_fallidos INTEGER DEFAULT 0, bloqueo_hasta TEXT DEFAULT NULL, token_sesion TEXT DEFAULT NULL, token_sesion_hash TEXT DEFAULT NULL, token_expira_en TEXT DEFAULT NULL, rol TEXT DEFAULT 'contribuyente', usuario TEXT, debe_cambiar INTEGER DEFAULT 0, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text), csrf_token_hash TEXT DEFAULT NULL, reset_token_hash TEXT DEFAULT NULL, reset_expira_en TEXT DEFAULT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS login_otp (id BIGSERIAL PRIMARY KEY, usuario_id BIGINT NOT NULL REFERENCES usuarios(id), challenge_token TEXT UNIQUE NOT NULL, otp_hash TEXT NOT NULL, expira_en TEXT NOT NULL, intentos INTEGER DEFAULT 0, generaciones INTEGER DEFAULT 0, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS documentos (id BIGSERIAL PRIMARY KEY, usuario_id BIGINT NOT NULL REFERENCES usuarios(id), nombre_archivo TEXT NOT NULL, ruta TEXT NOT NULL, carpeta TEXT NOT NULL, subcarpeta TEXT DEFAULT '', subcarpeta2 TEXT DEFAULT '', subido_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS subcarpetas (id BIGSERIAL PRIMARY KEY, usuario_id BIGINT NOT NULL REFERENCES usuarios(id), carpeta TEXT NOT NULL, nombre TEXT NOT NULL, padre TEXT DEFAULT '')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS tickets_recuperacion (id BIGSERIAL PRIMARY KEY, usuario_id BIGINT NOT NULL REFERENCES usuarios(id), ruc TEXT NOT NULL, estado TEXT DEFAULT 'pendiente', nueva_password TEXT DEFAULT NULL, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text), resuelto_en TEXT DEFAULT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS facturas_clientes (id BIGSERIAL PRIMARY KEY, cliente_id BIGINT NOT NULL REFERENCES usuarios(id), numero TEXT NOT NULL, fecha TEXT NOT NULL DEFAULT (CURRENT_DATE::text), concepto TEXT NOT NULL, monto DOUBLE PRECISION NOT NULL DEFAULT 0, estado TEXT NOT NULL DEFAULT 'emitida', creado_por BIGINT REFERENCES usuarios(id), creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text), articulo_id BIGINT, tarifa_id BIGINT, cantidad DOUBLE PRECISION DEFAULT 1)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_facturas_cliente ON facturas_clientes(cliente_id, fecha)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS articulos (id BIGSERIAL PRIMARY KEY, codigo TEXT UNIQUE NOT NULL, nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', unidad TEXT NOT NULL DEFAULT 'servicio', activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS tarifas_articulos (id BIGSERIAL PRIMARY KEY, articulo_id BIGINT NOT NULL REFERENCES articulos(id), precio DOUBLE PRECISION NOT NULL DEFAULT 0, vigencia_desde TEXT NOT NULL, vigencia_hasta TEXT NOT NULL, ajuste_vencimiento DOUBLE PRECISION NOT NULL DEFAULT 0, activo INTEGER NOT NULL DEFAULT 1, creado_por BIGINT REFERENCES usuarios(id), creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tarifas_articulo_vigencia ON tarifas_articulos(articulo_id, vigencia_desde, vigencia_hasta)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS costos_persona (id BIGSERIAL PRIMARY KEY, usuario_id BIGINT NOT NULL REFERENCES usuarios(id), costo_hora DOUBLE PRECISION NOT NULL DEFAULT 0, vigencia_desde TEXT NOT NULL, vigencia_hasta TEXT DEFAULT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_por BIGINT REFERENCES usuarios(id), creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_costos_persona_vigencia ON costos_persona(usuario_id, vigencia_desde, vigencia_hasta)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS tareas (id BIGSERIAL PRIMARY KEY, cliente_id BIGINT NOT NULL REFERENCES usuarios(id), titulo TEXT NOT NULL, descripcion TEXT DEFAULT '', prioridad TEXT NOT NULL DEFAULT 'media', estado TEXT NOT NULL DEFAULT 'pendiente', asignado_id BIGINT REFERENCES usuarios(id), creado_por BIGINT NOT NULL REFERENCES usuarios(id), fecha_limite TEXT DEFAULT NULL, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text), iniciado_en TEXT DEFAULT NULL, completado_en TEXT DEFAULT NULL)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_cliente ON tareas(cliente_id, estado)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tareas_asignado ON tareas(asignado_id, estado)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS sesiones_trabajo (id BIGSERIAL PRIMARY KEY, tarea_id BIGINT NOT NULL REFERENCES tareas(id), cliente_id BIGINT NOT NULL REFERENCES usuarios(id), usuario_id BIGINT NOT NULL REFERENCES usuarios(id), inicio TEXT NOT NULL, fin TEXT DEFAULT NULL, creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_cliente ON sesiones_trabajo(cliente_id, inicio)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_usuario_activa ON sesiones_trabajo(usuario_id, fin)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_superadmin ON usuarios(rol) WHERE rol = 'superadmin'")
+        conn.execute("""CREATE OR REPLACE FUNCTION _julianday(value TEXT) RETURNS DOUBLE PRECISION LANGUAGE SQL IMMUTABLE RETURNS NULL ON NULL INPUT AS 'SELECT EXTRACT(EPOCH FROM value::timestamp) / 86400.0'""")
+        conn.execute("UPDATE usuarios SET usuario = ruc WHERE (usuario IS NULL OR TRIM(usuario) = '')")
+        superadmin=conn.execute("SELECT id, usuario FROM usuarios WHERE rol = 'superadmin' LIMIT 1").fetchone()
+        if superadmin:
+            conn.execute("UPDATE usuarios SET rol = 'contribuyente' WHERE rol = 'superadmin' AND id != ?", (superadmin["id"],))
+            usuario_configurado=os.environ.get("SUPERADMIN_USUARIO", "").strip() or "superadmin"
+            placeholders={"el usuario que quieras conservar/crear", "superadmin"}
+            if usuario_configurado.lower() in placeholders: usuario_configurado="superadmin"
+            if superadmin["usuario"] in placeholders or not str(superadmin["usuario"] or "").strip():
+                conflicto=conn.execute("SELECT id FROM usuarios WHERE usuario = ? AND id != ?", (usuario_configurado, superadmin["id"])).fetchone()
+                if not conflicto: conn.execute("UPDATE usuarios SET usuario = ? WHERE id = ?", (usuario_configurado, superadmin["id"]))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+if DB_BACKEND == "postgres":
+    init_db_postgres()
+else:
+    init_db()
+
+def insertar_y_obtener_id(conn, sql, params=()):
+    if DB_BACKEND == "postgres":
+        row = conn.execute(_adapt_postgres_sql(sql).rstrip().rstrip(";") + " RETURNING id", params).fetchone()
+        return row["id"]
+    return conn.execute(sql, params).lastrowid
 
 # ---------- Utilidades ----------
 def hash_password(pw):
@@ -668,7 +742,7 @@ def superadmin_bootstrap():
                     (usuario_configurado, usuario_id),
                 ).fetchone()
                 if conflicto:
-                    raise sqlite3.IntegrityError("El usuario 'superadmin' ya pertenece a otra cuenta.")
+                    raise ValueError("El usuario superadmin ya pertenece a otra cuenta.")
                 usuario = usuario_configurado
             else:
                 usuario = superadmin["usuario"]
@@ -692,20 +766,20 @@ def superadmin_bootstrap():
             # El RUC es NOT NULL + UNIQUE en el esquema histórico, por lo que usamos
             # un identificador interno reservado que no puede confundirse con un RUC real.
             ruc_superadmin = "SUPERADMIN-000000"
-            cur = conn.execute(
+            usuario_id = insertar_y_obtener_id(
+                conn,
                 """INSERT INTO usuarios
                    (ruc, correo, nombre, password_hash, activo, usuario, rol, debe_cambiar)
                    VALUES (?, ?, 'SUPERADMIN', ?, 1, ?, 'superadmin', 0)""",
                 (ruc_superadmin, correo, hash_password(nueva_password), usuario),
             )
-            usuario_id = cur.lastrowid
             accion = "superadmin_created"
 
         conn.execute(
             "UPDATE superadmin_bootstrap SET usado = 1, usado_en = datetime('now') WHERE id = 1"
         )
         conn.commit()
-    except sqlite3.IntegrityError as exc:
+    except DB_INTEGRITY_ERROR as exc:
         conn.rollback()
         app.logger.exception("Error de integridad durante bootstrap del SUPERADMIN: %s", exc)
         conn.close()
@@ -1083,11 +1157,11 @@ def crear_usuario():
     conn = get_db()
     try:
         hashed = hash_password(contrasena)
-        cur = conn.execute("INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, ?, 1)",
-                           (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
+        usuario_id = insertar_y_obtener_id(conn, "INSERT INTO usuarios (ruc, correo, nombre, password_hash, usuario, rol, debe_cambiar) VALUES (?, ?, ?, ?, ?, ?, 1)",
+                                           (ruc, correo, nombre, hashed, usuario_nuevo, rol_nuevo))
         conn.commit()
-        return jsonify({"ok": True, "id": cur.lastrowid}), 201
-    except sqlite3.IntegrityError:
+        return jsonify({"ok": True, "id": usuario_id}), 201
+    except DB_INTEGRITY_ERROR:
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
@@ -1116,7 +1190,7 @@ def editar_usuario(usuario_id):
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
@@ -1237,11 +1311,11 @@ def admin_subir_documento(usuario_id):
     os.makedirs(dir_carpeta, exist_ok=True)
     archivo.save(ruta)
     conn = get_db()
-    cur = conn.execute("INSERT INTO documentos (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2) VALUES (?, ?, ?, ?, ?, ?)",
-                       (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2))
+    documento_id = insertar_y_obtener_id(conn, "INSERT INTO documentos (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2) VALUES (?, ?, ?, ?, ?, ?)",
+                                         (usuario_id, nombre_archivo, ruta, carpeta, subcarpeta, subcarpeta2))
     conn.commit()
     conn.close()
-    return jsonify({"ok": True, "id": cur.lastrowid}), 201
+    return jsonify({"ok": True, "id": documento_id}), 201
 
 # Admin: eliminar documento
 @app.route("/api/admin/documentos/<int:doc_id>", methods=["DELETE"])
@@ -1422,9 +1496,9 @@ def crear_articulo():
         return jsonify({"error":"Código y nombre son obligatorios."}),400
     conn=get_db()
     try:
-        cur=conn.execute("INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,descripcion,unidad))
-        conn.commit(); aid=cur.lastrowid
-    except sqlite3.IntegrityError:
+        aid=insertar_y_obtener_id(conn,"INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,descripcion,unidad))
+        conn.commit()
+    except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close(); return jsonify({"error":"El código del artículo ya existe."}),409
     conn.close(); return jsonify({"ok":True,"id":aid})
 
@@ -1444,7 +1518,7 @@ def actualizar_articulo(articulo_id):
     valores.append(articulo_id); conn=get_db()
     try:
         conn.execute("UPDATE articulos SET "+", ".join(cambios)+" WHERE id=?",tuple(valores)); conn.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close(); return jsonify({"error":"El código ya está utilizado."}),409
     conn.close(); return jsonify({"ok":True})
 
@@ -1473,11 +1547,11 @@ def crear_tarifa():
     conn=get_db()
     if not conn.execute("SELECT id FROM articulos WHERE id=? AND activo=1",(articulo_id,)).fetchone():
         conn.close(); return jsonify({"error":"Artículo no encontrado o inactivo."}),404
-    cur=conn.execute("""
+    tid=insertar_y_obtener_id(conn,"""
         INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
         VALUES(?,?,?,?,?,?)
     """,(articulo_id,precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
-    conn.commit(); tid=cur.lastrowid; conn.close()
+    conn.commit(); conn.close()
     return jsonify({"ok":True,"id":tid,"precio_sugerido_siguiente":round(precio*(1+ajuste/100),2)})
 
 @app.route("/api/admin/tarifas/<int:tarifa_id>/renovar", methods=["POST"])
@@ -1492,11 +1566,11 @@ def renovar_tarifa(tarifa_id):
         conn.close(); return jsonify({"error":"La vigencia es inválida."}),400
     precio=float(data.get("precio", anterior["precio"]*(1+ajuste/100)))
     if precio < 0: conn.close(); return jsonify({"error":"Precio inválido."}),400
-    cur=conn.execute("""
+    tid=insertar_y_obtener_id(conn,"""
         INSERT INTO tarifas_articulos(articulo_id,precio,vigencia_desde,vigencia_hasta,ajuste_vencimiento,creado_por)
         VALUES(?,?,?,?,?,?)
     """,(anterior["articulo_id"],precio,desde,hasta,ajuste,obtener_usuario_por_token()["id"]))
-    conn.commit(); tid=cur.lastrowid; conn.close()
+    conn.commit(); conn.close()
     return jsonify({"ok":True,"id":tid,"precio":round(precio,2),"precio_anterior":float(anterior["precio"]),"factor":ajuste})
 
 @app.route("/api/admin/tarifas/vencidas", methods=["GET"])
@@ -1539,11 +1613,11 @@ def crear_costo_persona():
     conn=get_db()
     if not _usuario_trabajo_valido(conn,usuario_id):
         conn.close(); return jsonify({"error":"La persona no es ADMIN/OPERATIVO activo."}),400
-    cur=conn.execute("""
+    cid=insertar_y_obtener_id(conn,"""
         INSERT INTO costos_persona(usuario_id,costo_hora,vigencia_desde,vigencia_hasta,creado_por)
         VALUES(?,?,?,?,?)
     """,(usuario_id,costo,desde,hasta,obtener_usuario_por_token()["id"]))
-    conn.commit(); cid=cur.lastrowid; conn.close()
+    conn.commit(); conn.close()
     return jsonify({"ok":True,"id":cid})
 
 @app.route("/api/admin/costos-persona/resumen", methods=["GET"])
@@ -1749,14 +1823,13 @@ def crear_factura_cliente():
         conn.close()
         return jsonify({"error": "Cliente no encontrado."}), 404
     try:
-        cur = conn.execute("""
+        factura_id = insertar_y_obtener_id(conn,"""
             INSERT INTO facturas_clientes
             (cliente_id, numero, fecha, concepto, monto, estado, creado_por, articulo_id, tarifa_id, cantidad)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"], articulo_id, tarifa_id, cantidad))
         conn.commit()
-        factura_id = cur.lastrowid
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.rollback()
         conn.close()
         return jsonify({"error": "No se pudo registrar la factura."}), 409
@@ -1817,13 +1890,12 @@ def crear_tarea():
         if not asignado or not puede_gestionar(actual["rol"], asignado["rol"]):
             conn.close()
             return jsonify({"error": "No tenés permisos para designar esa tarea."}), 403
-    cur = conn.execute("""
+    tarea_id = insertar_y_obtener_id(conn,"""
         INSERT INTO tareas
         (cliente_id, titulo, descripcion, prioridad, asignado_id, creado_por, fecha_limite)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (cliente_id, titulo, descripcion, prioridad, asignado_id, actual["id"], fecha_limite))
     conn.commit()
-    tarea_id = cur.lastrowid
     conn.close()
     return jsonify({"ok": True, "id": tarea_id})
 

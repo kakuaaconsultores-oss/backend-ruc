@@ -3,3 +3,4 @@ flask-cors
 requests
 gunicorn
 bcrypt
+psycopg[binary]
