@@ -70,6 +70,8 @@ def main():
         return
     if not DATABASE_URL:
         raise SystemExit("DATABASE_URL no está configurado.")
+    # Importing app initializes the PostgreSQL schema before we copy rows.
+    import app  # noqa: F401
     if not os.path.exists(SQLITE_PATH):
         raise SystemExit(f"No existe la base SQLite a migrar: {SQLITE_PATH}")
 
