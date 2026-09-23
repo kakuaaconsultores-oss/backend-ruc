@@ -6,7 +6,7 @@ from psycopg.rows import dict_row
 
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
-SQLITE_PATH = os.environ.get("SQLITE_MIGRATION_PATH", "/var/data/usuarios.db")
+SQLITE_PATH = os.environ.get("SQLITE_MIGRATION_PATH", "").strip()
 
 TABLES = [
     "rate_limit_events",
@@ -23,6 +23,28 @@ TABLES = [
     "tareas",
     "sesiones_trabajo",
 ]
+
+
+def find_sqlite_source():
+    """Busca una SQLite heredada sin asumir que existe un Persistent Disk."""
+    candidates = []
+    if SQLITE_PATH:
+        candidates.append(SQLITE_PATH)
+    candidates.extend([
+        "/var/data/usuarios.db",
+        "/app/usuarios.db",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "usuarios.db"),
+    ])
+
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def table_columns_sqlite(conn, table):
@@ -68,14 +90,28 @@ def main():
     if os.environ.get("MIGRATE_SQLITE_TO_POSTGRES", "0") != "1":
         print("[MIGRATION] Deshabilitada (MIGRATE_SQLITE_TO_POSTGRES != 1).")
         return
+
     if not DATABASE_URL:
         raise SystemExit("DATABASE_URL no está configurado.")
+
     # Importing app initializes the PostgreSQL schema before we copy rows.
     import app  # noqa: F401
-    if not os.path.exists(SQLITE_PATH):
-        raise SystemExit(f"No existe la base SQLite a migrar: {SQLITE_PATH}")
 
-    sqlite_conn = sqlite3.connect(f"file:{SQLITE_PATH}?mode=ro", uri=True)
+    sqlite_path = find_sqlite_source()
+    if not sqlite_path:
+        print(
+            "[MIGRATION] No se encontró una SQLite heredada. "
+            "Se continúa con PostgreSQL sin migrar datos."
+        )
+        print(
+            "[MIGRATION] Rutas revisadas: "
+            "/var/data/usuarios.db, /app/usuarios.db y la ruta del proyecto."
+        )
+        return
+
+    print(f"[MIGRATION] SQLite encontrada: {sqlite_path}")
+
+    sqlite_conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
     sqlite_conn.row_factory = sqlite3.Row
     pg_conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
@@ -108,7 +144,7 @@ def main():
                 + ", ".join(non_empty)
             )
 
-        print(f"[MIGRATION] Origen: {SQLITE_PATH}")
+        print(f"[MIGRATION] Origen: {sqlite_path}")
         print("[MIGRATION] Destino: PostgreSQL")
 
         for table in TABLES:
