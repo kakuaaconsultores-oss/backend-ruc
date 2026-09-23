@@ -3,4 +3,4 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["sh", "-c", "python migrate_sqlite_to_postgres.py && gunicorn --bind 0.0.0.0:${PORT:-10000} app:app"]
+CMD ["sh", "-c", "python migrate_sqlite_to_postgres.py && python diagnostico_superadmin.py && gunicorn --bind 0.0.0.0:${PORT:-10000} app:app"]
