@@ -957,7 +957,6 @@ def sesion_actual():
 
 
 @app.route("/api/logout", methods=["POST"])
-@csrf_required
 def logout():
     u = obtener_usuario_por_token()
     if u:
