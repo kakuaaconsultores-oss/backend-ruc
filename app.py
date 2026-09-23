@@ -2181,14 +2181,26 @@ def _validar_cuenta_contable(data, conn, cuenta_id=None):
         existe=conn.execute("SELECT id FROM cuentas_contables WHERE codigo = ?",(codigo,)).fetchone()
     if existe:
         return "Ya existe una cuenta con ese código."
+    imputable = bool(data.get("imputable", True))
+    if cuenta_id is not None:
+        hijos = conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cuenta_padre_id = ?", (cuenta_id,)).fetchone()["n"]
+        movimientos = conn.execute("SELECT COUNT(*) AS n FROM detalle_asientos WHERE cuenta_id = ?", (cuenta_id,)).fetchone()["n"]
+        if imputable and hijos:
+            return "La cuenta tiene subcuentas y no puede ser imputable. Primero desactivá la imputabilidad."
+        if not imputable and movimientos:
+            return "La cuenta tiene movimientos y no puede convertirse en no imputable."
+
     padre=data.get("cuenta_padre_id")
     if padre not in (None,"","null"):
         try: padre=int(padre)
         except (TypeError,ValueError): return "La cuenta padre no es válida."
         if cuenta_id is not None and padre == cuenta_id:
             return "Una cuenta no puede ser su propia cuenta padre."
-        if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ?",(padre,)).fetchone():
+        padre_fila = conn.execute("SELECT id, imputable FROM cuentas_contables WHERE id = ?",(padre,)).fetchone()
+        if not padre_fila:
             return "La cuenta padre no existe."
+        if padre_fila["imputable"]:
+            return "La cuenta padre debe ser no imputable."
     return None
 
 @app.route("/api/contabilidad/cuentas", methods=["GET"])
