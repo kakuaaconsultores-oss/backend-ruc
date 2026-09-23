@@ -2087,6 +2087,44 @@ def consultar_ruc():
     except requests.RequestException:
         return jsonify({"error": "No se pudo conectar con el servicio de consulta de RUC."}), 502
 
+# Búsqueda pública de contribuyentes por nombre, apellido, razón social o documento.
+# TuRuc permite búsquedas flexibles y paginadas desde 3 caracteres.
+@app.route("/api/ruc/search", methods=["GET"])
+def buscar_ruc():
+    termino = str(request.args.get("search", "")).strip()
+    pagina = str(request.args.get("page", "0")).strip() or "0"
+
+    if len(termino) < 3:
+        return jsonify({"error": "Ingresá al menos 3 caracteres para buscar."}), 400
+
+    try:
+        pagina_num = int(pagina)
+        if pagina_num < 0:
+            raise ValueError
+    except ValueError:
+        return jsonify({"error": "La página indicada no es válida."}), 400
+
+    try:
+        respuesta = requests.get(
+            "https://turuc.com.py/api/contribuyente/search",
+            params={"search": termino, "page": pagina_num},
+            timeout=10,
+            headers={"Accept": "application/json", "User-Agent": "Kakuaa-Consultores/1.0"},
+        )
+        try:
+            datos = respuesta.json()
+        except ValueError:
+            return jsonify({"error": "TuRuc devolvió una respuesta no válida."}), 502
+
+        if respuesta.status_code >= 400:
+            mensaje = datos.get("message") if isinstance(datos, dict) else None
+            return jsonify({"error": mensaje or "No se pudo realizar la búsqueda."}), respuesta.status_code
+
+        return jsonify(datos), 200
+    except requests.RequestException:
+        return jsonify({"error": "No se pudo conectar con el servicio de búsqueda de RUC."}), 502
+
 
 if __name__ == "__main__":
+
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
