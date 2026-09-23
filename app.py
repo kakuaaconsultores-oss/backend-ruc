@@ -1190,7 +1190,7 @@ def editar_usuario(usuario_id):
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.close()
         return jsonify({"error": "El RUC o correo ya existe"}), 409
 
@@ -1498,7 +1498,7 @@ def crear_articulo():
     try:
         aid=insertar_y_obtener_id(conn,"INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,descripcion,unidad))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close(); return jsonify({"error":"El código del artículo ya existe."}),409
     conn.close(); return jsonify({"ok":True,"id":aid})
 
@@ -1518,7 +1518,7 @@ def actualizar_articulo(articulo_id):
     valores.append(articulo_id); conn=get_db()
     try:
         conn.execute("UPDATE articulos SET "+", ".join(cambios)+" WHERE id=?",tuple(valores)); conn.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close(); return jsonify({"error":"El código ya está utilizado."}),409
     conn.close(); return jsonify({"ok":True})
 
@@ -1829,7 +1829,7 @@ def crear_factura_cliente():
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"], articulo_id, tarifa_id, cantidad))
         conn.commit()
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         conn.rollback()
         conn.close()
         return jsonify({"error": "No se pudo registrar la factura."}), 409
