@@ -2080,6 +2080,276 @@ def detalle_tiempo_cliente(cliente_id):
 
 
 
+    # ==================== CONTABILIDAD ====================
+    conn.execute("""CREATE TABLE IF NOT EXISTS cuentas_contables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT NOT NULL UNIQUE,
+        nombre TEXT NOT NULL,
+        descripcion TEXT DEFAULT '',
+        tipo TEXT NOT NULL,
+        naturaleza TEXT NOT NULL,
+        nivel INTEGER NOT NULL DEFAULT 1,
+        cuenta_padre_id INTEGER DEFAULT NULL,
+        imputable INTEGER NOT NULL DEFAULT 1,
+        activa INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT DEFAULT (datetime('now')),
+        actualizado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_codigo ON cuentas_contables(codigo)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_padre ON cuentas_contables(cuenta_padre_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS periodos_contables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anio INTEGER NOT NULL,
+        mes INTEGER NOT NULL,
+        fecha_inicio TEXT NOT NULL,
+        fecha_fin TEXT NOT NULL,
+        estado TEXT NOT NULL DEFAULT 'abierto',
+        UNIQUE(anio, mes)
+    )""")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS asientos_contables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        numero INTEGER,
+        fecha TEXT NOT NULL,
+        concepto TEXT NOT NULL,
+        origen TEXT NOT NULL DEFAULT 'MANUAL',
+        referencia_tipo TEXT DEFAULT NULL,
+        referencia_id INTEGER DEFAULT NULL,
+        estado TEXT NOT NULL DEFAULT 'borrador',
+        usuario_creador_id INTEGER NOT NULL,
+        usuario_contabilizador_id INTEGER DEFAULT NULL,
+        contabilizado_en TEXT DEFAULT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        actualizado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (usuario_creador_id) REFERENCES usuarios(id),
+        FOREIGN KEY (usuario_contabilizador_id) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asientos_fecha ON asientos_contables(fecha, estado)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_asientos_origen ON asientos_contables(origen, referencia_tipo, referencia_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS detalle_asientos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asiento_id INTEGER NOT NULL,
+        cuenta_id INTEGER NOT NULL,
+        descripcion TEXT DEFAULT '',
+        debe REAL NOT NULL DEFAULT 0,
+        haber REAL NOT NULL DEFAULT 0,
+        orden INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY (asiento_id) REFERENCES asientos_contables(id) ON DELETE CASCADE,
+        FOREIGN KEY (cuenta_id) REFERENCES cuentas_contables(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_detalle_asiento ON detalle_asientos(asiento_id, orden)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_detalle_cuenta ON detalle_asientos(cuenta_id)")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS reglas_contables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        origen TEXT NOT NULL,
+        cuenta_debe_id INTEGER DEFAULT NULL,
+        cuenta_haber_id INTEGER DEFAULT NULL,
+        activa INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (cuenta_debe_id) REFERENCES cuentas_contables(id),
+        FOREIGN KEY (cuenta_haber_id) REFERENCES cuentas_contables(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reglas_origen ON reglas_contables(origen, activa)")
+
+
+# ==================== API CONTABILIDAD ====================
+
+def _validar_cuenta_contable(data, conn, cuenta_id=None):
+    codigo = str(data.get("codigo", "")).strip()
+    nombre = str(data.get("nombre", "")).strip()
+    tipo = str(data.get("tipo", "")).strip().lower()
+    naturaleza = str(data.get("naturaleza", "")).strip().lower()
+    try:
+        nivel = int(data.get("nivel", 1))
+    except (TypeError, ValueError):
+        return "El nivel debe ser numérico."
+    if not codigo or not nombre:
+        return "Código y nombre son obligatorios."
+    if tipo not in {"activo", "pasivo", "patrimonio", "ingreso", "costo", "gasto"}:
+        return "El tipo de cuenta no es válido."
+    if naturaleza not in {"deudora", "acreedora"}:
+        return "La naturaleza debe ser deudora o acreedora."
+    if nivel < 1:
+        return "El nivel debe ser mayor o igual a 1."
+    if cuenta_id is not None:
+        existe=conn.execute("SELECT id FROM cuentas_contables WHERE codigo = ? AND id <> ?",(codigo,cuenta_id)).fetchone()
+    else:
+        existe=conn.execute("SELECT id FROM cuentas_contables WHERE codigo = ?",(codigo,)).fetchone()
+    if existe:
+        return "Ya existe una cuenta con ese código."
+    padre=data.get("cuenta_padre_id")
+    if padre not in (None,"","null"):
+        try: padre=int(padre)
+        except (TypeError,ValueError): return "La cuenta padre no es válida."
+        if cuenta_id is not None and padre == cuenta_id:
+            return "Una cuenta no puede ser su propia cuenta padre."
+        if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ?",(padre,)).fetchone():
+            return "La cuenta padre no existe."
+    return None
+
+@app.route("/api/contabilidad/cuentas", methods=["GET"])
+@admin_required
+def listar_cuentas_contables():
+    conn=get_db()
+    filas=conn.execute("""SELECT c.*, p.codigo AS padre_codigo, p.nombre AS padre_nombre
+                          FROM cuentas_contables c
+                          LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id
+                          ORDER BY c.codigo""").fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in filas])
+
+@app.route("/api/contabilidad/cuentas", methods=["POST"])
+@admin_required
+def crear_cuenta_contable():
+    data=request.get_json(silent=True) or {}
+    conn=get_db()
+    error=_validar_cuenta_contable(data,conn)
+    if error:
+        conn.close(); return jsonify({"error":error}),400
+    padre=data.get("cuenta_padre_id")
+    padre=int(padre) if padre not in (None,"","null") else None
+    nivel=int(data.get("nivel",1))
+    conn.execute("""INSERT INTO cuentas_contables
+        (codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa)
+        VALUES (?,?,?,?,?,?,?,?,?)""",
+        (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
+         str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),nivel,padre,
+         1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0))
+    fila=conn.execute("SELECT * FROM cuentas_contables WHERE codigo = ?",(str(data["codigo"]).strip(),)).fetchone()
+    conn.commit(); conn.close()
+    return jsonify({"ok":True,"cuenta":dict(fila)}),201
+
+@app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["PUT"])
+@admin_required
+def actualizar_cuenta_contable(cuenta_id):
+    data=request.get_json(silent=True) or {}
+    conn=get_db()
+    if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ?",(cuenta_id,)).fetchone():
+        conn.close(); return jsonify({"error":"Cuenta no encontrada."}),404
+    error=_validar_cuenta_contable(data,conn,cuenta_id)
+    if error:
+        conn.close(); return jsonify({"error":error}),400
+    padre=data.get("cuenta_padre_id")
+    padre=int(padre) if padre not in (None,"","null") else None
+    conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
+                    nivel=?,cuenta_padre_id=?,imputable=?,activa=?,actualizado_en=CURRENT_TIMESTAMP
+                    WHERE id=?""",
+        (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
+         str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
+         1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,cuenta_id))
+    fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=?",(cuenta_id,)).fetchone()
+    conn.commit(); conn.close()
+    return jsonify({"ok":True,"cuenta":dict(fila)})
+
+@app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["DELETE"])
+@admin_required
+def eliminar_cuenta_contable(cuenta_id):
+    conn=get_db()
+    movimientos=conn.execute("SELECT COUNT(*) AS n FROM detalle_asientos WHERE cuenta_id=?",(cuenta_id,)).fetchone()["n"]
+    hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cuenta_padre_id=?",(cuenta_id,)).fetchone()["n"]
+    if movimientos or hijos:
+        conn.close(); return jsonify({"error":"La cuenta tiene movimientos o subcuentas y no puede eliminarse. Desactivala en su lugar."}),409
+    cur=conn.execute("DELETE FROM cuentas_contables WHERE id=?",(cuenta_id,))
+    conn.commit(); conn.close()
+    if cur.rowcount == 0: return jsonify({"error":"Cuenta no encontrada."}),404
+    return jsonify({"ok":True})
+
+@app.route("/api/contabilidad/asientos", methods=["GET"])
+@admin_required
+def listar_asientos_contables():
+    conn=get_db()
+    filas=conn.execute("""SELECT a.*, u.nombre AS creador_nombre,
+                          uc.nombre AS contabilizador_nombre,
+                          COALESCE(SUM(d.debe),0) AS total_debe,
+                          COALESCE(SUM(d.haber),0) AS total_haber
+                          FROM asientos_contables a
+                          JOIN usuarios u ON u.id=a.usuario_creador_id
+                          LEFT JOIN usuarios uc ON uc.id=a.usuario_contabilizador_id
+                          LEFT JOIN detalle_asientos d ON d.asiento_id=a.id
+                          GROUP BY a.id ORDER BY a.fecha DESC,a.id DESC""").fetchall()
+    conn.close()
+    return jsonify([dict(f) for f in filas])
+
+@app.route("/api/contabilidad/asientos", methods=["POST"])
+@admin_required
+def crear_asiento_contable():
+    data=request.get_json(silent=True) or {}
+    fecha=str(data.get("fecha","")).strip()
+    concepto=str(data.get("concepto","")).strip()
+    origen=str(data.get("origen","MANUAL")).strip().upper()
+    detalles=data.get("detalles") or []
+    if not fecha or not concepto or not isinstance(detalles,list) or len(detalles)<2:
+        return jsonify({"error":"Fecha, concepto y al menos dos líneas son obligatorios."}),400
+    conn=get_db()
+    debe=haber=0.0
+    for i,d in enumerate(detalles,1):
+        try:
+            cuenta_id=int(d.get("cuenta_id"))
+            debe_i=float(d.get("debe",0) or 0)
+            haber_i=float(d.get("haber",0) or 0)
+        except (TypeError,ValueError):
+            conn.close(); return jsonify({"error":f"Línea {i} inválida."}),400
+        if debe_i < 0 or haber_i < 0 or (debe_i > 0 and haber_i > 0) or (debe_i == 0 and haber_i == 0):
+            conn.close(); return jsonify({"error":f"Línea {i}: una línea debe tener débito o crédito, no ambos."}),400
+        if not conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND activa=1",(cuenta_id,)).fetchone():
+            conn.close(); return jsonify({"error":f"La cuenta de la línea {i} no existe o está inactiva."}),400
+        debe += debe_i; haber += haber_i
+    if round(debe,2) != round(haber,2):
+        conn.close(); return jsonify({"error":"El asiento no está cuadrado: el total del debe debe coincidir con el haber."}),400
+    u=obtener_usuario_por_token()
+    conn.execute("""INSERT INTO asientos_contables
+        (fecha,concepto,origen,estado,usuario_creador_id) VALUES (?,?,?,?,?)""",
+        (fecha,concepto,origen,"borrador",u["id"]))
+    asiento=conn.execute("SELECT id FROM asientos_contables ORDER BY id DESC LIMIT 1").fetchone()
+    asiento_id=asiento["id"]
+    for i,d in enumerate(detalles,1):
+        conn.execute("""INSERT INTO detalle_asientos
+            (asiento_id,cuenta_id,descripcion,debe,haber,orden) VALUES (?,?,?,?,?,?)""",
+            (asiento_id,int(d["cuenta_id"]),str(d.get("descripcion","")).strip(),
+             float(d.get("debe",0) or 0),float(d.get("haber",0) or 0),i))
+    conn.commit()
+    fila=conn.execute("SELECT * FROM asientos_contables WHERE id=?",(asiento_id,)).fetchone()
+    conn.close()
+    return jsonify({"ok":True,"asiento":dict(fila)}),201
+
+@app.route("/api/contabilidad/asientos/<int:asiento_id>/contabilizar", methods=["POST"])
+@admin_required
+def contabilizar_asiento_contable(asiento_id):
+    conn=get_db()
+    a=conn.execute("SELECT * FROM asientos_contables WHERE id=?",(asiento_id,)).fetchone()
+    if not a:
+        conn.close(); return jsonify({"error":"Asiento no encontrado."}),404
+    if a["estado"] != "borrador":
+        conn.close(); return jsonify({"error":"Solo se pueden contabilizar asientos en borrador."}),409
+    tot=conn.execute("SELECT COALESCE(SUM(debe),0) AS debe,COALESCE(SUM(haber),0) AS haber FROM detalle_asientos WHERE asiento_id=?",(asiento_id,)).fetchone()
+    if round(float(tot["debe"]),2) != round(float(tot["haber"]),2) or float(tot["debe"]) <= 0:
+        conn.close(); return jsonify({"error":"El asiento debe estar cuadrado y tener importe antes de contabilizar."}),409
+    u=obtener_usuario_por_token()
+    numero=conn.execute("SELECT COALESCE(MAX(numero),0)+1 AS n FROM asientos_contables WHERE estado='contabilizado'").fetchone()["n"]
+    conn.execute("""UPDATE asientos_contables SET estado='contabilizado',numero=?,
+                    usuario_contabilizador_id=?,contabilizado_en=CURRENT_TIMESTAMP,
+                    actualizado_en=CURRENT_TIMESTAMP WHERE id=?""",(numero,u["id"],asiento_id))
+    conn.commit(); conn.close()
+    return jsonify({"ok":True,"numero":numero})
+
+@app.route("/api/contabilidad/asientos/<int:asiento_id>/anular", methods=["POST"])
+@admin_required
+def anular_asiento_contable(asiento_id):
+    conn=get_db()
+    a=conn.execute("SELECT * FROM asientos_contables WHERE id=?",(asiento_id,)).fetchone()
+    if not a:
+        conn.close(); return jsonify({"error":"Asiento no encontrado."}),404
+    if a["estado"] not in ("borrador","contabilizado"):
+        conn.close(); return jsonify({"error":"El asiento ya está anulado."}),409
+    conn.execute("UPDATE asientos_contables SET estado='anulado',actualizado_en=CURRENT_TIMESTAMP WHERE id=?",(asiento_id,))
+    conn.commit(); conn.close()
+    return jsonify({"ok":True})
+
 # Consulta pública de RUC mediante la API de integración de TuRuc.
 # El backend actúa como proxy para que el frontend de Kakuaa no dependa
 # directamente de la API externa ni tenga problemas de CORS.
