@@ -45,20 +45,29 @@ def table_columns_postgres(conn, table):
 def reset_sequence(conn, table):
     if "id" not in table_columns_postgres(conn, table):
         return
+    sequence = conn.execute(
+        "SELECT pg_get_serial_sequence(%s, 'id') AS sequence_name",
+        (table,),
+    ).fetchone()["sequence_name"]
+    if not sequence:
+        return
     conn.execute(
         f"""
         SELECT setval(
-            pg_get_serial_sequence(%s, 'id'),
+            %s,
             COALESCE(MAX(id), 1),
             MAX(id) IS NOT NULL
         )
         FROM "{table}"
         """,
-        (table,),
+        (sequence,),
     )
 
 
 def main():
+    if os.environ.get("MIGRATE_SQLITE_TO_POSTGRES", "0") != "1":
+        print("[MIGRATION] Deshabilitada (MIGRATE_SQLITE_TO_POSTGRES != 1).")
+        return
     if not DATABASE_URL:
         raise SystemExit("DATABASE_URL no está configurado.")
     if not os.path.exists(SQLITE_PATH):
@@ -90,7 +99,6 @@ def main():
             row = pg_conn.execute(f'SELECT COUNT(*) AS total FROM "{table}"').fetchone()
             if int(row["total"]) > 0:
                 non_empty.append(f"{table}={row['total']}")
-        # superadmin_bootstrap is initialized with its mandatory id=1 row.
         non_empty = [x for x in non_empty if not x.startswith("superadmin_bootstrap=")]
         if non_empty:
             raise RuntimeError(
@@ -102,6 +110,9 @@ def main():
         print("[MIGRATION] Destino: PostgreSQL")
 
         for table in TABLES:
+            if table == "superadmin_bootstrap":
+                pg_conn.execute("DELETE FROM superadmin_bootstrap")
+
             sqlite_cols = table_columns_sqlite(sqlite_conn, table)
             pg_cols = table_columns_postgres(pg_conn, table)
             cols = [c for c in sqlite_cols if c in pg_cols]
