@@ -6,6 +6,7 @@ import secrets
 import hashlib
 import html
 import shutil
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
