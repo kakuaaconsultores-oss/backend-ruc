@@ -2058,5 +2058,34 @@ def detalle_tiempo_cliente(cliente_id):
 
 
 
+# Consulta pública de RUC mediante la API de integración de TuRuc.
+# El backend actúa como proxy para que el frontend de Kakuaa no dependa
+# directamente de la API externa ni tenga problemas de CORS.
+@app.route("/api/ruc", methods=["GET"])
+def consultar_ruc():
+    ruc = str(request.args.get("ruc", "")).strip()
+    if not ruc:
+        return jsonify({"error": "El RUC es obligatorio."}), 400
+
+    try:
+        respuesta = requests.get(
+            f"https://turuc.com.py/api/contribuyente/{ruc}",
+            timeout=10,
+            headers={"Accept": "application/json", "User-Agent": "Kakuaa-Consultores/1.0"},
+        )
+        try:
+            datos = respuesta.json()
+        except ValueError:
+            return jsonify({"error": "TuRuc devolvió una respuesta no válida."}), 502
+
+        if respuesta.status_code >= 400:
+            mensaje = datos.get("message") if isinstance(datos, dict) else None
+            return jsonify({"error": mensaje or "No se pudo consultar el RUC."}), respuesta.status_code
+
+        return jsonify(datos), 200
+    except requests.RequestException:
+        return jsonify({"error": "No se pudo conectar con el servicio de consulta de RUC."}), 502
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
