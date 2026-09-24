@@ -72,7 +72,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
-                iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0) ON DELETE CASCADE)""")
+                iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 tipo_comprobante_id INTEGER, numero TEXT NOT NULL, cdc TEXT DEFAULT '', fecha TEXT NOT NULL,
@@ -89,7 +89,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, comprobante_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
-                cuenta_contable_id INTEGER DEFAULT NULL) ON DELETE CASCADE)""")
+                cuenta_contable_id INTEGER DEFAULT NULL)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
@@ -102,7 +102,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
-                concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0) ON DELETE CASCADE)""")
+                concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
@@ -153,10 +153,9 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
             if not d.get("razon_social"): return jsonify({"error":"La razón social es obligatoria."}),400
-            rid=insertar=get_db # placeholder replaced below
-            cur=conn.execute("INSERT INTO proveedores(cliente_id,ruc,razon_social,nombre_comercial,documento,correo,telefono,direccion,condicion_compra_id,forma_pago_id,cuenta_contable_id,creado_por) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            rid=insertar_id(conn, "INSERT INTO proveedores(cliente_id,ruc,razon_social,nombre_comercial,documento,correo,telefono,direccion,condicion_compra_id,forma_pago_id,cuenta_contable_id,creado_por) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (cid,d.get("ruc",""),d["razon_social"],d.get("nombre_comercial",""),d.get("documento",""),d.get("correo",""),d.get("telefono",""),d.get("direccion",""),d.get("condicion_compra_id"),d.get("forma_pago_id"),d.get("cuenta_contable_id"),None))
-            conn.commit(); return jsonify({"id":cur.lastrowid}),201
+            conn.commit(); return jsonify({"id":rid}),201
         finally: conn.close()
 
     def crud_catalogo(path, table, fields):
