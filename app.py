@@ -535,6 +535,76 @@ def init_db_postgres():
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_usuario ON usuario_clientes(usuario_id, cliente_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_cliente ON usuario_clientes(cliente_id, usuario_id)")
+        # ==================== CONTABILIDAD ====================
+        conn.execute("""CREATE TABLE IF NOT EXISTS cuentas_contables (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT DEFAULT NULL REFERENCES clientes(id),
+            codigo TEXT NOT NULL,
+            nombre TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            tipo TEXT NOT NULL,
+            naturaleza TEXT NOT NULL,
+            nivel INTEGER NOT NULL DEFAULT 1,
+            cuenta_padre_id BIGINT DEFAULT NULL,
+            imputable INTEGER NOT NULL DEFAULT 1,
+            activa INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
+        )""")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_cliente_codigo ON cuentas_contables(cliente_id, codigo)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_cliente ON cuentas_contables(cliente_id, codigo)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS periodos_contables (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT DEFAULT NULL REFERENCES clientes(id),
+            anio INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            fecha_inicio TEXT NOT NULL,
+            fecha_fin TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'abierto',
+            UNIQUE(cliente_id, anio, mes)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_periodos_cliente ON periodos_contables(cliente_id, anio, mes)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS asientos_contables (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT DEFAULT NULL REFERENCES clientes(id),
+            numero INTEGER,
+            fecha TEXT NOT NULL,
+            concepto TEXT NOT NULL,
+            origen TEXT NOT NULL DEFAULT 'MANUAL',
+            referencia_tipo TEXT DEFAULT NULL,
+            referencia_id INTEGER DEFAULT NULL,
+            estado TEXT NOT NULL DEFAULT 'borrador',
+            usuario_creador_id BIGINT NOT NULL REFERENCES usuarios(id),
+            usuario_contabilizador_id BIGINT DEFAULT NULL REFERENCES usuarios(id),
+            contabilizado_en TEXT DEFAULT NULL,
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_asientos_cliente ON asientos_contables(cliente_id, fecha, estado)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_asientos_origen ON asientos_contables(origen, referencia_tipo, referencia_id)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS detalle_asientos (
+            id BIGSERIAL PRIMARY KEY,
+            asiento_id BIGINT NOT NULL REFERENCES asientos_contables(id) ON DELETE CASCADE,
+            cuenta_id BIGINT NOT NULL REFERENCES cuentas_contables(id),
+            descripcion TEXT DEFAULT '',
+            debe DOUBLE PRECISION NOT NULL DEFAULT 0,
+            haber DOUBLE PRECISION NOT NULL DEFAULT 0,
+            orden INTEGER NOT NULL DEFAULT 1
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_detalle_asiento ON detalle_asientos(asiento_id, orden)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_detalle_cuenta ON detalle_asientos(cuenta_id)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS reglas_contables (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT DEFAULT NULL REFERENCES clientes(id),
+            nombre TEXT NOT NULL,
+            origen TEXT NOT NULL,
+            cuenta_debe_id BIGINT DEFAULT NULL REFERENCES cuentas_contables(id),
+            cuenta_haber_id BIGINT DEFAULT NULL REFERENCES cuentas_contables(id),
+            activa INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reglas_cliente ON reglas_contables(cliente_id, origen, activa)")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2381,7 +2451,8 @@ def detalle_tiempo_cliente(cliente_id):
     # ==================== CONTABILIDAD ====================
     conn.execute("""CREATE TABLE IF NOT EXISTS cuentas_contables (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        codigo TEXT NOT NULL UNIQUE,
+        cliente_id INTEGER DEFAULT NULL,
+        codigo TEXT NOT NULL,
         nombre TEXT NOT NULL,
         descripcion TEXT DEFAULT '',
         tipo TEXT NOT NULL,
@@ -2404,11 +2475,13 @@ def detalle_tiempo_cliente(cliente_id):
         fecha_inicio TEXT NOT NULL,
         fecha_fin TEXT NOT NULL,
         estado TEXT NOT NULL DEFAULT 'abierto',
-        UNIQUE(anio, mes)
+        cliente_id INTEGER DEFAULT NULL,
+        UNIQUE(cliente_id, anio, mes)
     )""")
 
     conn.execute("""CREATE TABLE IF NOT EXISTS asientos_contables (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER DEFAULT NULL,
         numero INTEGER,
         fecha TEXT NOT NULL,
         concepto TEXT NOT NULL,
@@ -2443,6 +2516,7 @@ def detalle_tiempo_cliente(cliente_id):
 
     conn.execute("""CREATE TABLE IF NOT EXISTS reglas_contables (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER DEFAULT NULL,
         nombre TEXT NOT NULL,
         origen TEXT NOT NULL,
         cuenta_debe_id INTEGER DEFAULT NULL,
@@ -2455,9 +2529,34 @@ def detalle_tiempo_cliente(cliente_id):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reglas_origen ON reglas_contables(origen, activa)")
 
 
+# ==================== CONTEXTO CONTABLE ====================
+
+def obtener_cliente_contable():
+    """Obtiene y valida el cliente activo enviado por el ERP."""
+    usuario = obtener_usuario_por_token()
+    if not usuario:
+        return None, (jsonify({"error": "No autorizado"}), 401)
+    raw = request.headers.get("X-Cliente-ID", "").strip()
+    if not raw:
+        return None, (jsonify({"error": "Seleccioná un cliente antes de usar Contabilidad."}), 400)
+    try:
+        cliente_id = int(raw)
+    except ValueError:
+        return None, (jsonify({"error": "El cliente seleccionado no es válido."}), 400)
+    conn = get_db()
+    fila = conn.execute("SELECT * FROM clientes WHERE id = ? AND estado = 'activo'", (cliente_id,)).fetchone()
+    if not fila:
+        conn.close()
+        return None, (jsonify({"error": "El cliente seleccionado no existe o está inactivo."}), 404)
+    if not _puede_acceder_cliente(conn, usuario, cliente_id):
+        conn.close()
+        return None, (jsonify({"error": "No tenés acceso a este cliente."}), 403)
+    conn.close()
+    return cliente_id, None
+
 # ==================== API CONTABILIDAD ====================
 
-def _validar_cuenta_contable(data, conn, cuenta_id=None):
+def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     codigo = str(data.get("codigo", "")).strip()
     nombre = str(data.get("nombre", "")).strip()
     tipo = str(data.get("tipo", "")).strip().lower()
@@ -2475,15 +2574,17 @@ def _validar_cuenta_contable(data, conn, cuenta_id=None):
     if nivel < 1:
         return "El nivel debe ser mayor o igual a 1."
     if cuenta_id is not None:
-        existe=conn.execute("SELECT id FROM cuentas_contables WHERE codigo = ? AND id <> ?",(codigo,cuenta_id)).fetchone()
+        existe=conn.execute("SELECT id FROM cuentas_contables WHERE cliente_id = ? AND codigo = ? AND id <> ?",(cliente_id,codigo,cuenta_id)).fetchone()
     else:
-        existe=conn.execute("SELECT id FROM cuentas_contables WHERE codigo = ?",(codigo,)).fetchone()
+        existe=conn.execute("SELECT id FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,codigo)).fetchone()
     if existe:
         return "Ya existe una cuenta con ese código."
     imputable = bool(data.get("imputable", True))
     if cuenta_id is not None:
-        hijos = conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cuenta_padre_id = ?", (cuenta_id,)).fetchone()["n"]
-        movimientos = conn.execute("SELECT COUNT(*) AS n FROM detalle_asientos WHERE cuenta_id = ?", (cuenta_id,)).fetchone()["n"]
+        hijos = conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id = ? AND cuenta_padre_id = ?", (cliente_id, cuenta_id)).fetchone()["n"]
+        movimientos = conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
+                                      JOIN asientos_contables a ON a.id = d.asiento_id
+                                      WHERE d.cuenta_id = ? AND a.cliente_id = ?""", (cuenta_id, cliente_id)).fetchone()["n"]
         if imputable and hijos:
             return "La cuenta tiene subcuentas y no puede ser imputable. Primero desactivá la imputabilidad."
         if not imputable and movimientos:
@@ -2495,7 +2596,7 @@ def _validar_cuenta_contable(data, conn, cuenta_id=None):
         except (TypeError,ValueError): return "La cuenta padre no es válida."
         if cuenta_id is not None and padre == cuenta_id:
             return "Una cuenta no puede ser su propia cuenta padre."
-        padre_fila = conn.execute("SELECT id, imputable FROM cuentas_contables WHERE id = ?",(padre,)).fetchone()
+        padre_fila = conn.execute("SELECT id, imputable FROM cuentas_contables WHERE id = ? AND cliente_id = ?",(padre,cliente_id)).fetchone()
         if not padre_fila:
             return "La cuenta padre no existe."
         if padre_fila["imputable"]:
@@ -2505,73 +2606,94 @@ def _validar_cuenta_contable(data, conn, cuenta_id=None):
 @app.route("/api/contabilidad/cuentas", methods=["GET"])
 @admin_required
 def listar_cuentas_contables():
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     conn=get_db()
     filas=conn.execute("""SELECT c.*, p.codigo AS padre_codigo, p.nombre AS padre_nombre
                           FROM cuentas_contables c
-                          LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id
-                          ORDER BY c.codigo""").fetchall()
+                          LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id AND p.cliente_id=c.cliente_id
+                          WHERE c.cliente_id = ?
+                          ORDER BY c.codigo""",(cliente_id,)).fetchall()
     conn.close()
     return jsonify([dict(f) for f in filas])
 
 @app.route("/api/contabilidad/cuentas", methods=["POST"])
 @admin_required
 def crear_cuenta_contable():
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     data=request.get_json(silent=True) or {}
     conn=get_db()
-    error=_validar_cuenta_contable(data,conn)
+    error=_validar_cuenta_contable(data,conn,cliente_id)
     if error:
         conn.close(); return jsonify({"error":error}),400
     padre=data.get("cuenta_padre_id")
     padre=int(padre) if padre not in (None,"","null") else None
     nivel=int(data.get("nivel",1))
-    conn.execute("""INSERT INTO cuentas_contables
-        (codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa)
-        VALUES (?,?,?,?,?,?,?,?,?)""",
-        (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
-         str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),nivel,padre,
-         1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0))
-    fila=conn.execute("SELECT * FROM cuentas_contables WHERE codigo = ?",(str(data["codigo"]).strip(),)).fetchone()
-    conn.commit(); conn.close()
-    return jsonify({"ok":True,"cuenta":dict(fila)}),201
+    try:
+        conn.execute("""INSERT INTO cuentas_contables
+            (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (cliente_id,str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
+             str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),nivel,padre,
+             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0))
+        fila=conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,str(data["codigo"]).strip())).fetchone()
+        conn.commit(); conn.close()
+        return jsonify({"ok":True,"cuenta":dict(fila)}),201
+    except DB_INTEGRITY_ERROR:
+        conn.rollback(); conn.close()
+        return jsonify({"error":"Ya existe una cuenta con ese código para este cliente."}),409
 
 @app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["PUT"])
 @admin_required
 def actualizar_cuenta_contable(cuenta_id):
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     data=request.get_json(silent=True) or {}
     conn=get_db()
-    if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ?",(cuenta_id,)).fetchone():
-        conn.close(); return jsonify({"error":"Cuenta no encontrada."}),404
-    error=_validar_cuenta_contable(data,conn,cuenta_id)
+    if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ? AND cliente_id = ?",(cuenta_id,cliente_id)).fetchone():
+        conn.close(); return jsonify({"error":"Cuenta no encontrada para el cliente seleccionado."}),404
+    error=_validar_cuenta_contable(data,conn,cliente_id,cuenta_id)
     if error:
         conn.close(); return jsonify({"error":error}),400
     padre=data.get("cuenta_padre_id")
     padre=int(padre) if padre not in (None,"","null") else None
-    conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
-                    nivel=?,cuenta_padre_id=?,imputable=?,activa=?,actualizado_en=CURRENT_TIMESTAMP
-                    WHERE id=?""",
-        (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
-         str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
-         1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,cuenta_id))
-    fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=?",(cuenta_id,)).fetchone()
-    conn.commit(); conn.close()
-    return jsonify({"ok":True,"cuenta":dict(fila)})
+    try:
+        conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
+                        nivel=?,cuenta_padre_id=?,imputable=?,activa=?,actualizado_en=CURRENT_TIMESTAMP
+                        WHERE id=? AND cliente_id=?""",
+            (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
+             str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
+             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,cuenta_id,cliente_id))
+        fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id)).fetchone()
+        conn.commit(); conn.close()
+        return jsonify({"ok":True,"cuenta":dict(fila)})
+    except DB_INTEGRITY_ERROR:
+        conn.rollback(); conn.close()
+        return jsonify({"error":"Ya existe otra cuenta para este cliente con ese código."}),409
 
 @app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["DELETE"])
 @admin_required
 def eliminar_cuenta_contable(cuenta_id):
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     conn=get_db()
-    movimientos=conn.execute("SELECT COUNT(*) AS n FROM detalle_asientos WHERE cuenta_id=?",(cuenta_id,)).fetchone()["n"]
-    hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cuenta_padre_id=?",(cuenta_id,)).fetchone()["n"]
+    movimientos=conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
+                                JOIN asientos_contables a ON a.id=d.asiento_id
+                                WHERE d.cuenta_id=? AND a.cliente_id=?""",(cuenta_id,cliente_id)).fetchone()["n"]
+    hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id=? AND cuenta_padre_id=?",(cliente_id,cuenta_id)).fetchone()["n"]
     if movimientos or hijos:
         conn.close(); return jsonify({"error":"La cuenta tiene movimientos o subcuentas y no puede eliminarse. Desactivala en su lugar."}),409
-    cur=conn.execute("DELETE FROM cuentas_contables WHERE id=?",(cuenta_id,))
+    cur=conn.execute("DELETE FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id))
     conn.commit(); conn.close()
-    if cur.rowcount == 0: return jsonify({"error":"Cuenta no encontrada."}),404
+    if cur.rowcount == 0: return jsonify({"error":"Cuenta no encontrada"}),404
     return jsonify({"ok":True})
 
 @app.route("/api/contabilidad/asientos", methods=["GET"])
 @admin_required
 def listar_asientos_contables():
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     conn=get_db()
     filas=conn.execute("""SELECT a.*, u.nombre AS creador_nombre,
                           uc.nombre AS contabilizador_nombre,
@@ -2581,13 +2703,16 @@ def listar_asientos_contables():
                           JOIN usuarios u ON u.id=a.usuario_creador_id
                           LEFT JOIN usuarios uc ON uc.id=a.usuario_contabilizador_id
                           LEFT JOIN detalle_asientos d ON d.asiento_id=a.id
-                          GROUP BY a.id ORDER BY a.fecha DESC,a.id DESC""").fetchall()
+                          WHERE a.cliente_id = ?
+                          GROUP BY a.id ORDER BY a.fecha DESC,a.id DESC""",(cliente_id,)).fetchall()
     conn.close()
     return jsonify([dict(f) for f in filas])
 
 @app.route("/api/contabilidad/asientos", methods=["POST"])
 @admin_required
 def crear_asiento_contable():
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     data=request.get_json(silent=True) or {}
     fecha=str(data.get("fecha","")).strip()
     concepto=str(data.get("concepto","")).strip()
@@ -2606,16 +2731,16 @@ def crear_asiento_contable():
             conn.close(); return jsonify({"error":f"Línea {i} inválida."}),400
         if debe_i < 0 or haber_i < 0 or (debe_i > 0 and haber_i > 0) or (debe_i == 0 and haber_i == 0):
             conn.close(); return jsonify({"error":f"Línea {i}: una línea debe tener débito o crédito, no ambos."}),400
-        if not conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND activa=1",(cuenta_id,)).fetchone():
+        if not conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND cliente_id=? AND activa=1",(cuenta_id,cliente_id)).fetchone():
             conn.close(); return jsonify({"error":f"La cuenta de la línea {i} no existe o está inactiva."}),400
         debe += debe_i; haber += haber_i
     if round(debe,2) != round(haber,2):
         conn.close(); return jsonify({"error":"El asiento no está cuadrado: el total del debe debe coincidir con el haber."}),400
     u=obtener_usuario_por_token()
     conn.execute("""INSERT INTO asientos_contables
-        (fecha,concepto,origen,estado,usuario_creador_id) VALUES (?,?,?,?,?)""",
-        (fecha,concepto,origen,"borrador",u["id"]))
-    asiento=conn.execute("SELECT id FROM asientos_contables ORDER BY id DESC LIMIT 1").fetchone()
+        (cliente_id,fecha,concepto,origen,estado,usuario_creador_id) VALUES (?,?,?,?,?,?)""",
+        (cliente_id,fecha,concepto,origen,"borrador",u["id"]))
+    asiento=conn.execute("SELECT id FROM asientos_contables WHERE cliente_id=? ORDER BY id DESC LIMIT 1",(cliente_id,)).fetchone()
     asiento_id=asiento["id"]
     for i,d in enumerate(detalles,1):
         conn.execute("""INSERT INTO detalle_asientos
@@ -2630,8 +2755,10 @@ def crear_asiento_contable():
 @app.route("/api/contabilidad/asientos/<int:asiento_id>/contabilizar", methods=["POST"])
 @admin_required
 def contabilizar_asiento_contable(asiento_id):
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     conn=get_db()
-    a=conn.execute("SELECT * FROM asientos_contables WHERE id=?",(asiento_id,)).fetchone()
+    a=conn.execute("SELECT * FROM asientos_contables WHERE id=? AND cliente_id=?",(asiento_id,cliente_id)).fetchone()
     if not a:
         conn.close(); return jsonify({"error":"Asiento no encontrado."}),404
     if a["estado"] != "borrador":
@@ -2640,7 +2767,7 @@ def contabilizar_asiento_contable(asiento_id):
     if round(float(tot["debe"]),2) != round(float(tot["haber"]),2) or float(tot["debe"]) <= 0:
         conn.close(); return jsonify({"error":"El asiento debe estar cuadrado y tener importe antes de contabilizar."}),409
     u=obtener_usuario_por_token()
-    numero=conn.execute("SELECT COALESCE(MAX(numero),0)+1 AS n FROM asientos_contables WHERE estado='contabilizado'").fetchone()["n"]
+    numero=conn.execute("SELECT COALESCE(MAX(numero),0)+1 AS n FROM asientos_contables WHERE cliente_id=? AND estado='contabilizado'").fetchone()["n"]
     conn.execute("""UPDATE asientos_contables SET estado='contabilizado',numero=?,
                     usuario_contabilizador_id=?,contabilizado_en=CURRENT_TIMESTAMP,
                     actualizado_en=CURRENT_TIMESTAMP WHERE id=?""",(numero,u["id"],asiento_id))
@@ -2650,8 +2777,10 @@ def contabilizar_asiento_contable(asiento_id):
 @app.route("/api/contabilidad/asientos/<int:asiento_id>/anular", methods=["POST"])
 @admin_required
 def anular_asiento_contable(asiento_id):
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
     conn=get_db()
-    a=conn.execute("SELECT * FROM asientos_contables WHERE id=?",(asiento_id,)).fetchone()
+    a=conn.execute("SELECT * FROM asientos_contables WHERE id=? AND cliente_id=?",(asiento_id,cliente_id)).fetchone()
     if not a:
         conn.close(); return jsonify({"error":"Asiento no encontrado."}),404
     if a["estado"] not in ("borrador","contabilizado"):
