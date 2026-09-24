@@ -1,5 +1,7 @@
 import json
 import os
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from flask import request, jsonify
 
@@ -67,6 +69,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 ("condiciones_compra", "tipo", "TEXT NOT NULL DEFAULT 'dias'"),
                 ("condiciones_compra", "cuotas", "INTEGER NOT NULL DEFAULT 1"),
                 ("formas_pago_compra", "cuenta_contable_id", "INTEGER"),
+                ("comprobantes_compra", "timbrado_id", "INTEGER"),
             ):
                 if not _column_exists(table, column):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -78,6 +81,16 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cuenta_contable_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'activo',
                 creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedores_cliente ON proveedores(cliente_id, estado, razon_social)")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedor_timbrados (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
+                tipo_comprobante_id INTEGER NOT NULL, modalidad TEXT NOT NULL DEFAULT 'IMPRESO',
+                numero_timbrado TEXT NOT NULL, establecimiento TEXT DEFAULT '', punto_expedicion TEXT DEFAULT '',
+                numero_desde INTEGER NOT NULL DEFAULT 1, numero_hasta INTEGER NOT NULL DEFAULT 1,
+                fecha_inicio TEXT DEFAULT NULL, fecha_vencimiento TEXT DEFAULT NULL,
+                activo INTEGER NOT NULL DEFAULT 1, observacion TEXT DEFAULT '',
+                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedor_timbrados ON proveedor_timbrados(cliente_id, proveedor_id, activo)")
+
             conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
@@ -158,6 +171,34 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
     def parse_json():
         return request.get_json(silent=True) or {}
 
+    def _validar_timbrado(conn,cid,proveedor_id,tipo_comprobante_id,numero,fecha,timbrado_id=None):
+        raw=str(numero or "").strip()
+        partes=raw.split("-")
+        if len(partes)!=3 or not all(p.isdigit() for p in partes):
+            return None,"El número debe tener formato 001-001-0000001."
+        establecimiento=partes[0].zfill(3); punto=partes[1].zfill(3); secuencia=int(partes[2])
+        params=[proveedor_id,cid]
+        sql="""SELECT pt.*, t.nombre tipo_nombre FROM proveedor_timbrados pt
+               LEFT JOIN tipos_comprobante_compra t ON t.id=pt.tipo_comprobante_id
+               WHERE pt.proveedor_id=? AND pt.cliente_id=? AND pt.activo=1"""
+        if tipo_comprobante_id not in (None,""):
+            sql+=" AND pt.tipo_comprobante_id=?"; params.append(int(tipo_comprobante_id))
+        if timbrado_id not in (None,""):
+            sql+=" AND pt.id=?"; params.append(int(timbrado_id))
+        sql+=" ORDER BY pt.fecha_vencimiento DESC,pt.id DESC"
+        rows=conn.execute(sql,params).fetchall()
+        f=str(fecha or "")[:10]
+        for row in rows:
+            if row["establecimiento"] and str(row["establecimiento"]).zfill(3)!=establecimiento: continue
+            if row["punto_expedicion"] and str(row["punto_expedicion"]).zfill(3)!=punto: continue
+            if not (int(row["numero_desde"])<=secuencia<=int(row["numero_hasta"])): continue
+            if row["fecha_inicio"] and f<str(row["fecha_inicio"])[:10]: continue
+            venc=str(row["fecha_vencimiento"] or "")[:10]
+            if venc and venc!="3000-12-31" and f>venc: continue
+            return dict(row),""
+        return None,"El número no corresponde a ningún timbrado activo del proveedor para ese tipo, rango y fecha."
+
+
     @app.get("/api/compras/catalogos")
     @usuario_required
     def compras_catalogos():
@@ -185,6 +226,32 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             return jsonify([dict(x) for x in conn.execute("SELECT * FROM proveedores WHERE cliente_id=? ORDER BY razon_social",(cid,)).fetchall()])
         finally: conn.close()
 
+    @app.get("/api/compras/proveedores/consulta-ruc/<path:ruc>")
+    @usuario_required
+    def consultar_ruc_proveedor(ruc):
+        ruc = urllib.parse.unquote(str(ruc or "")).strip().upper()
+        if not ruc:
+            return jsonify({"error":"Ingresá un RUC."}),400
+        try:
+            url = "https://turuc.com.py/api/contribuyente/" + urllib.parse.quote(ruc, safe="-")
+            req = urllib.request.Request(url, headers={"Accept":"application/json","User-Agent":"Kakuaa-ERP/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            data = payload.get("data") or {}
+            if not data or not data.get("ruc"):
+                return jsonify({"error":payload.get("message") or "No se encontró el contribuyente para ese RUC."}),404
+            return jsonify({"ok":True,"data":{
+                "ruc":data.get("ruc") or ruc,
+                "razon_social":data.get("razonSocial") or "",
+                "dv":data.get("dv"),
+                "documento":data.get("doc"),
+                "estado":data.get("estado") or "",
+                "es_persona_juridica":bool(data.get("esPersonaJuridica")),
+                "es_entidad_publica":bool(data.get("esEntidadPublica"))
+            }})
+        except Exception as e:
+            return jsonify({"error":"No se pudo consultar TuRuc en este momento. Podés volver a intentar."}),502
+
     @app.post("/api/compras/proveedores")
     @staff_required
     def crear_proveedor():
@@ -192,11 +259,115 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            if not d.get("razon_social"): return jsonify({"error":"La razón social es obligatoria."}),400
+            ruc=(d.get("ruc") or "").strip().upper()
+            razon=(d.get("razon_social") or "").strip()
+            if not ruc: return jsonify({"error":"El RUC es obligatorio."}),400
+            if not razon: return jsonify({"error":"La razón social es obligatoria. Consultá el RUC antes de guardar."}),400
+            existente=conn.execute("SELECT id FROM proveedores WHERE cliente_id=? AND UPPER(ruc)=? LIMIT 1",(cid,ruc)).fetchone()
+            if existente:return jsonify({"error":"Ya existe un proveedor con ese RUC en este cliente."}),409
             rid=insertar_id(conn, "INSERT INTO proveedores(cliente_id,ruc,razon_social,nombre_comercial,documento,correo,telefono,direccion,condicion_compra_id,forma_pago_id,cuenta_contable_id,creado_por) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (cid,d.get("ruc",""),d["razon_social"],d.get("nombre_comercial",""),d.get("documento",""),d.get("correo",""),d.get("telefono",""),d.get("direccion",""),d.get("condicion_compra_id"),d.get("forma_pago_id"),d.get("cuenta_contable_id"),None))
+                (cid,ruc,razon,(d.get("nombre_comercial") or "").strip(),d.get("documento",""),(d.get("correo") or "").strip(),(d.get("telefono") or "").strip(),(d.get("direccion") or "").strip(),d.get("condicion_compra_id"),d.get("forma_pago_id"),d.get("cuenta_contable_id"),None))
             conn.commit(); return jsonify({"id":rid}),201
+        except Exception as e:
+            conn.rollback(); return jsonify({"error":str(e)}),400
         finally: conn.close()
+
+    @app.get("/api/compras/proveedores/<int:proveedor_id>/timbrados")
+    @usuario_required
+    def listar_timbrados_proveedor(proveedor_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            if not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(proveedor_id,cid)).fetchone():
+                return jsonify({"error":"Proveedor inválido."}),404
+            rows=conn.execute("""SELECT pt.*, t.codigo tipo_codigo, t.nombre tipo_nombre
+                FROM proveedor_timbrados pt
+                LEFT JOIN tipos_comprobante_compra t ON t.id=pt.tipo_comprobante_id
+                WHERE pt.proveedor_id=? AND pt.cliente_id=?
+                ORDER BY pt.activo DESC, pt.fecha_vencimiento DESC, pt.id DESC""",(proveedor_id,cid)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally: conn.close()
+
+    @app.post("/api/compras/proveedores/<int:proveedor_id>/timbrados")
+    @staff_required
+    def crear_timbrado_proveedor(proveedor_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            if not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(proveedor_id,cid)).fetchone():
+                return jsonify({"error":"Proveedor inválido."}),404
+            tipo_id=d.get("tipo_comprobante_id")
+            if tipo_id in ("",None): return jsonify({"error":"Seleccioná el tipo de comprobante."}),400
+            if not conn.execute("SELECT 1 FROM tipos_comprobante_compra WHERE id=? AND cliente_id=?",(int(tipo_id),cid)).fetchone():
+                return jsonify({"error":"Tipo de comprobante inválido."}),400
+            numero=(d.get("numero_timbrado") or "").strip()
+            modalidad=(d.get("modalidad") or "IMPRESO").strip().upper()
+            establecimiento=(d.get("establecimiento") or "").strip()
+            punto=(d.get("punto_expedicion") or "").strip()
+            if not numero:return jsonify({"error":"El número de timbrado es obligatorio."}),400
+            if modalidad not in ("IMPRESO","ELECTRONICO","AUTO"): modalidad="IMPRESO"
+            if modalidad=="AUTO": modalidad="ELECTRONICO"
+            try:
+                desde=int(d.get("numero_desde")); hasta=int(d.get("numero_hasta"))
+            except (TypeError,ValueError):
+                return jsonify({"error":"El rango desde/hasta debe ser numérico."}),400
+            if desde<1 or hasta<desde:return jsonify({"error":"El rango de numeración no es válido."}),400
+            fecha_inicio=(d.get("fecha_inicio") or "").strip() or None
+            fecha_venc=(d.get("fecha_vencimiento") or "").strip() or None
+            if modalidad=="ELECTRONICO" and not fecha_venc: fecha_venc="3000-12-31"
+            if fecha_venc=="3000-12-31": modalidad="ELECTRONICO"
+            rid=insertar_id(conn, """INSERT INTO proveedor_timbrados
+                (cliente_id,proveedor_id,tipo_comprobante_id,modalidad,numero_timbrado,establecimiento,punto_expedicion,
+                 numero_desde,numero_hasta,fecha_inicio,fecha_vencimiento,activo,observacion)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (cid,proveedor_id,int(tipo_id),modalidad,numero,establecimiento,punto,desde,hasta,fecha_inicio,fecha_venc,1,d.get("observacion","")))
+            conn.commit(); return jsonify({"id":rid}),201
+        except Exception as e:
+            conn.rollback(); return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.put("/api/compras/proveedores/<int:proveedor_id>/timbrados/<int:timbrado_id>")
+    @staff_required
+    def editar_timbrado_proveedor(proveedor_id,timbrado_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM proveedor_timbrados WHERE id=? AND proveedor_id=? AND cliente_id=?",(timbrado_id,proveedor_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Timbrado no encontrado."}),404
+            tipo_id=d.get("tipo_comprobante_id")
+            numero=(d.get("numero_timbrado") or "").strip()
+            modalidad=(d.get("modalidad") or "IMPRESO").strip().upper()
+            if modalidad=="AUTO": modalidad="ELECTRONICO"
+            try:
+                desde=int(d.get("numero_desde")); hasta=int(d.get("numero_hasta"))
+            except (TypeError,ValueError): return jsonify({"error":"El rango desde/hasta debe ser numérico."}),400
+            if desde<1 or hasta<desde:return jsonify({"error":"El rango de numeración no es válido."}),400
+            fecha_venc=(d.get("fecha_vencimiento") or "").strip() or None
+            if modalidad=="ELECTRONICO" and not fecha_venc:fecha_venc="3000-12-31"
+            if fecha_venc=="3000-12-31":modalidad="ELECTRONICO"
+            conn.execute("""UPDATE proveedor_timbrados SET tipo_comprobante_id=?,modalidad=?,numero_timbrado=?,establecimiento=?,
+                punto_expedicion=?,numero_desde=?,numero_hasta=?,fecha_inicio=?,fecha_vencimiento=?,activo=?,observacion=?
+                WHERE id=? AND proveedor_id=? AND cliente_id=?""",
+                (int(tipo_id),modalidad,numero,d.get("establecimiento",""),d.get("punto_expedicion",""),desde,hasta,
+                 d.get("fecha_inicio") or None,fecha_venc,1 if d.get("activo",1) else 0,d.get("observacion",""),timbrado_id,proveedor_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.delete("/api/compras/proveedores/<int:proveedor_id>/timbrados/<int:timbrado_id>")
+    @staff_required
+    def desactivar_timbrado_proveedor(proveedor_id,timbrado_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            conn.execute("UPDATE proveedor_timbrados SET activo=0 WHERE id=? AND proveedor_id=? AND cliente_id=?",(timbrado_id,proveedor_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        finally:conn.close()
 
     def crud_catalogo(path, table, fields):
         @app.post(path, endpoint="compras_create_"+table)
@@ -386,8 +557,10 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             required=["proveedor_id","numero","fecha"]
             if any(d.get(x) in (None,"") for x in required): return jsonify({"error":"Proveedor, número y fecha son obligatorios."}),400
             if int(d["proveedor_id"]) and not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(int(d["proveedor_id"]),cid)).fetchone(): return jsonify({"error":"Proveedor inválido."}),400
-            cols=["cliente_id","proveedor_id","tipo_comprobante_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
-            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
+            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
+            timbrado,terr=_validar_timbrado(conn,cid,int(d["proveedor_id"]),d.get("tipo_comprobante_id"),d["numero"],d["fecha"],d.get("timbrado_id"))
+            if terr:return jsonify({"error":terr}),400
+            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
             cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
             if d.get("condicion_id"):
                 condicion=conn.execute("SELECT * FROM condiciones_compra WHERE id=? AND cliente_id=? AND activo=1",(int(d["condicion_id"]),cid)).fetchone()
