@@ -51,10 +51,13 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             except Exception: pass
             try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN cuotas INTEGER NOT NULL DEFAULT 1")
             except Exception: pass
+            try: conn.execute("ALTER TABLE formas_pago_compra ADD COLUMN cuenta_contable_id INTEGER")
+            except Exception: pass
             conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
-                nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', activo INTEGER NOT NULL DEFAULT 1,
-                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
+                nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
+                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
                 razon_social TEXT NOT NULL, nombre_comercial TEXT DEFAULT '', documento TEXT DEFAULT '',
@@ -185,6 +188,14 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cid,err=_cliente_id(conn)
                 if err:return jsonify({"error":err}),401
                 if not d.get("codigo") or not d.get("nombre"): return jsonify({"error":"Código y nombre son obligatorios."}),400
+                if table == "formas_pago_compra":
+                    cuenta=d.get("cuenta_contable_id")
+                    if cuenta not in (None,"","null"):
+                        cuenta=int(cuenta)
+                        ok=conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND (cliente_id=? OR cliente_id IS NULL)",(cuenta,cid)).fetchone()
+                        if not ok:return jsonify({"error":"La cuenta contable seleccionada no existe o no pertenece al cliente."}),400
+                        d["cuenta_contable_id"]=cuenta
+                    else:d["cuenta_contable_id"]=None
                 if table == "condiciones_compra":
                     tipo = (d.get("tipo") or "dias").strip().lower()
                     dias = int(d.get("dias_credito") or 0); cuotas = int(d.get("cuotas") or 1)
@@ -210,8 +221,31 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             finally: conn.close()
 
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
-    crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo"])
+    crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
     crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
+
+    @app.put("/api/compras/formas_pago_compra/<int:item_id>")
+    @staff_required
+    def editar_forma_pago_compra(item_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM formas_pago_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Forma de pago no encontrada."}),404
+            codigo=(d.get("codigo") or "").strip(); nombre=(d.get("nombre") or "").strip(); tipo=(d.get("tipo") or "contado").strip()
+            if not codigo or not nombre:return jsonify({"error":"Código y nombre son obligatorios."}),400
+            cuenta=d.get("cuenta_contable_id")
+            if cuenta not in (None,"","null"):
+                cuenta=int(cuenta)
+                ok=conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND (cliente_id=? OR cliente_id IS NULL)",(cuenta,cid)).fetchone()
+                if not ok:return jsonify({"error":"La cuenta contable seleccionada no existe o no pertenece al cliente."}),400
+            else: cuenta=None
+            conn.execute("UPDATE formas_pago_compra SET codigo=?,nombre=?,tipo=?,cuenta_contable_id=?,activo=? WHERE id=? AND cliente_id=?",(codigo,nombre,tipo,cuenta,1 if d.get("activo",1) else 0,item_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
 
     for _table in ("tipos_comprobante_compra","condiciones_compra"):
         @app.put(f"/api/compras/{_table}/<int:item_id>", endpoint="compras_edit_"+_table)
