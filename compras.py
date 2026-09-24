@@ -28,12 +28,12 @@ def _cliente_id(conn):
     if not u:
         return None, "No autorizado."
     ok = conn.execute("SELECT 1 FROM usuario_clientes WHERE usuario_id = ? AND cliente_id = ?", (u["id"], cid)).fetchone()
-    if not ok and u.get("rol") not in ("superadmin", "admin"):
+    if not ok and u["rol"] not in ("superadmin", "admin"):
         return None, "No autorizado para este cliente."
     exists = conn.execute("SELECT id FROM clientes WHERE id = ? AND estado = 'activo'", (cid,)).fetchone()
     return (cid, None) if exists else (None, "Cliente no encontrado o inactivo.")
 
-def register(app, get_db, staff_required, usuario_required):
+def register(app, get_db, staff_required, usuario_required, insertar_id):
     def init_compras():
         conn = get_db()
         try:
@@ -110,7 +110,7 @@ def register(app, get_db, staff_required, usuario_required):
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             for code,name,active in TIPOS_COMPROBANTE_DEFAULT:
-                try: conn.execute("INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) SELECT id,?,?,? FROM clientes WHERE NOT EXISTS (SELECT 1 FROM tipos_comprobante_compra t WHERE t.cliente_id=clientes.id AND t.codigo=?)", (code,name,active,code))
+                try: conn.execute("INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) SELECT id,?,?,? FROM clientes ON CONFLICT(cliente_id,codigo) DO NOTHING", (code,name,active))
                 except Exception: pass
             conn.commit()
         finally: conn.close()
@@ -230,7 +230,7 @@ def register(app, get_db, staff_required, usuario_required):
             if int(d["proveedor_id"]) and not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(int(d["proveedor_id"]),cid)).fetchone(): return jsonify({"error":"Proveedor inválido."}),400
             cols=["cliente_id","proveedor_id","tipo_comprobante_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
             vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
-            cur=conn.execute("INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")",vals); cidc=cur.lastrowid
+            cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
             for item in d.get("detalle",[]):
                 conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id) VALUES(?,?,?,?,?,?,?,?)""",
                     (cidc,item.get("concepto_id"),item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),float(item.get("iva_tasa",10) or 0),float(item.get("subtotal",0) or 0),item.get("cuenta_contable_id")))
