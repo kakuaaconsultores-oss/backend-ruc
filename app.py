@@ -441,12 +441,17 @@ def init_db():
         creado_en TEXT DEFAULT (datetime('now')),
         actualizado_en TEXT DEFAULT (datetime('now')),
         tipo_impuesto TEXT DEFAULT NULL,
+        tipos_impuesto TEXT DEFAULT NULL,
         FOREIGN KEY (creado_por) REFERENCES usuarios(id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
     try:
         conn.execute("ALTER TABLE clientes ADD COLUMN tipo_impuesto TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE clientes ADD COLUMN tipos_impuesto TEXT DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
     conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
@@ -526,11 +531,13 @@ def init_db_postgres():
             creado_por BIGINT REFERENCES usuarios(id),
             creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
             actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
-            tipo_impuesto TEXT DEFAULT NULL
+            tipo_impuesto TEXT DEFAULT NULL,
+            tipos_impuesto TEXT DEFAULT NULL
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
         conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS tipo_impuesto TEXT DEFAULT NULL")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS tipos_impuesto TEXT DEFAULT NULL")
         conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
             id BIGSERIAL PRIMARY KEY,
             cliente_id BIGINT NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
@@ -921,6 +928,24 @@ FORMULARIO_RENTA_CASILLAS = {
 def formulario_por_impuesto(tipo_impuesto):
     return CLIENTE_FORMULARIOS.get(str(tipo_impuesto or "").strip().upper())
 
+def _normalizar_impuestos_cliente(valores, impuesto_principal=None):
+    if not isinstance(valores, list):
+        valores = []
+    validos = []
+    for valor in valores:
+        codigo = str(valor or "").strip().upper()
+        if codigo in CLIENTE_IMPUESTOS_VALIDOS and codigo not in validos:
+            validos.append(codigo)
+    principal = str(impuesto_principal or "").strip().upper()
+    if principal in CLIENTE_IMPUESTOS_VALIDOS and principal not in validos:
+        validos.insert(0, principal)
+    return validos
+
+def _impuestos_cliente_desde_fila(fila):
+    raw = str(fila["tipos_impuesto"] or "").strip() if "tipos_impuesto" in fila.keys() else ""
+    impuestos = _normalizar_impuestos_cliente(raw.split(",") if raw else [], fila["tipo_impuesto"])
+    return impuestos
+
 def _cliente_obligaciones(conn, cliente_id):
     filas = conn.execute(
         "SELECT codigo FROM cliente_obligaciones WHERE cliente_id = ? AND activo = 1 ORDER BY codigo",
@@ -949,6 +974,7 @@ def _cliente_dict(conn, fila):
         "direccion": fila["direccion"] or "",
         "estado": fila["estado"],
         "obligaciones": obligaciones,
+        "impuestos": _impuestos_cliente_desde_fila(fila),
         "tipo_impuesto": tipo_impuesto,
         "formulario_impuesto": formulario_por_impuesto(tipo_impuesto),
         "perfil": perfil,
@@ -1018,14 +1044,18 @@ def crear_cliente():
     telefono = str(data.get("telefono", "")).strip()
     direccion = str(data.get("direccion", "")).strip()
     tipo_impuesto = str(data.get("tipo_impuesto", "")).strip().upper()
+    impuestos = _normalizar_impuestos_cliente(data.get("impuestos"), tipo_impuesto)
+    if not impuestos:
+        impuestos = _normalizar_impuestos_cliente([tipo_impuesto])
+    tipo_impuesto = impuestos[0] if impuestos else ""
     obligaciones = data.get("obligaciones") or []
 
     if not ruc or not razon:
         return jsonify({"error": "RUC y razón social son obligatorios."}), 400
     if tipo not in CLIENTE_TIPOS:
         return jsonify({"error": "El tipo de persona no es válido."}), 400
-    if tipo_impuesto not in CLIENTE_IMPUESTOS_VALIDOS:
-        return jsonify({"error": "Seleccioná un tipo de impuesto válido."}), 400
+    if not impuestos:
+        return jsonify({"error": "Seleccioná al menos un impuesto válido."}), 400
     if not isinstance(obligaciones, list):
         obligaciones = []
     obligacion_principal = "IVA" if tipo_impuesto == "IVA" else "IRP" if tipo_impuesto.startswith("IRP-") else "IRE"
@@ -1041,7 +1071,7 @@ def crear_cliente():
             """INSERT INTO clientes
                (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por, tipo_impuesto)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?, ?)""",
-            (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"], tipo_impuesto)
+            (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"], tipo_impuesto, ",".join(impuestos))
         )
         for codigo in obligaciones:
             conn.execute(
@@ -1076,8 +1106,10 @@ def actualizar_cliente(cliente_id):
     if tipo not in CLIENTE_TIPOS:
         return jsonify({"error": "El tipo de persona no es válido."}), 400
     tipo_impuesto = str(data.get("tipo_impuesto", "")).strip().upper()
-    if tipo_impuesto not in CLIENTE_IMPUESTOS_VALIDOS:
-        return jsonify({"error": "Seleccioná un tipo de impuesto válido."}), 400
+    impuestos = _normalizar_impuestos_cliente(data.get("impuestos"), tipo_impuesto)
+    if not impuestos:
+        return jsonify({"error": "Seleccioná al menos un impuesto válido."}), 400
+    tipo_impuesto = impuestos[0]
     obligaciones = data.get("obligaciones") or []
     if not isinstance(obligaciones, list):
         obligaciones = []
@@ -1094,10 +1126,10 @@ def actualizar_cliente(cliente_id):
         conn.execute(
             """UPDATE clientes SET ruc = ?, dv = ?, razon_social = ?, nombre_comercial = ?,
                tipo_persona = ?, documento = ?, correo = ?, telefono = ?, direccion = ?,
-               tipo_impuesto = ?, actualizado_en = CURRENT_TIMESTAMP WHERE id = ?""",
+               tipo_impuesto = ?, tipos_impuesto = ?, actualizado_en = CURRENT_TIMESTAMP WHERE id = ?""",
             (ruc, str(data.get("dv", "")).strip(), razon, str(data.get("nombre_comercial", "")).strip(),
              tipo, str(data.get("documento", "")).strip(), str(data.get("correo", "")).strip(),
-             str(data.get("telefono", "")).strip(), str(data.get("direccion", "")).strip(), tipo_impuesto, cliente_id)
+             str(data.get("telefono", "")).strip(), str(data.get("direccion", "")).strip(), tipo_impuesto, ",".join(impuestos), cliente_id)
         )
         conn.execute("DELETE FROM cliente_obligaciones WHERE cliente_id = ?", (cliente_id,))
         for codigo in obligaciones:
@@ -2723,7 +2755,7 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     if concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
         return "El concepto de Estado de Flujo de Efectivo no es válido."
 
-    formulario_esperado = "NO_APLICA"
+    formulario_esperado = str(data.get("formulario_impuesto", "")).strip().upper() if cliente_id is None else "NO_APLICA"
     if cliente_id is not None:
         fila_cliente = conn.execute("SELECT tipo_impuesto FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
         if not fila_cliente:
@@ -3104,7 +3136,9 @@ def importar_cuentas_contables():
                 parent_id=parent["id"]
             data={k:r[k] for k in ("codigo","nombre","tipo","naturaleza","nivel","imputable","concepto_flujo_efectivo","formulario_impuesto","inciso_formulario")}
             data["cuenta_padre_id"]=parent_id
-            if cliente_id is None: data["formulario_impuesto"]="NO_APLICA"; data["inciso_formulario"]=""
+            if cliente_id is None:
+                data["formulario_impuesto"] = str(data.get("formulario_impuesto","NO_APLICA")).strip().upper() or "NO_APLICA"
+                data["inciso_formulario"] = str(data.get("inciso_formulario","")).strip() if bool(data.get("imputable", True)) else ""
             err=_validar_cuenta_contable(data,conn,cliente_id)
             if err: raise ValueError(f"Fila {r['fila']}: {err}")
             conn.execute("""INSERT INTO cuentas_contables
