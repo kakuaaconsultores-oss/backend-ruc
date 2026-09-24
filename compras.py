@@ -72,8 +72,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
-                iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
-                FOREIGN KEY(orden_id) REFERENCES ordenes_compra(id) ON DELETE CASCADE)""")
+                iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0) ON DELETE CASCADE)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 tipo_comprobante_id INTEGER, numero TEXT NOT NULL, cdc TEXT DEFAULT '', fecha TEXT NOT NULL,
@@ -90,8 +89,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, comprobante_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
-                cuenta_contable_id INTEGER DEFAULT NULL,
-                FOREIGN KEY(comprobante_id) REFERENCES comprobantes_compra(id) ON DELETE CASCADE)""")
+                cuenta_contable_id INTEGER DEFAULT NULL) ON DELETE CASCADE)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
@@ -104,8 +102,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
-                concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0,
-                FOREIGN KEY(orden_pago_id) REFERENCES ordenes_pago(id) ON DELETE CASCADE)""")
+                concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0) ON DELETE CASCADE)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
