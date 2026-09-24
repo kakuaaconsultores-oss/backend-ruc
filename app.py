@@ -2769,19 +2769,16 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     if formulario_impuesto != formulario_esperado:
         return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
     if formulario_esperado in {"500", "501"}:
-        if bool(data.get("imputable", True)) and not inciso_formulario:
-            return "La referencia/casilla del Formulario 500/501 es obligatoria para una cuenta imputable."
-        if not bool(data.get("imputable", True)) and inciso_formulario:
-            return "El inciso/casilla del Formulario 500/501 solo puede asignarse a cuentas imputables."
-        if bool(data.get("imputable", True)) and inciso_formulario:
-            try:
-                inciso = int(inciso_formulario)
-            except ValueError:
-                return "El inciso/casilla del Formulario 500/501 debe ser numérico."
-            if inciso <= 0:
-                return "El inciso/casilla del Formulario 500/501 debe ser mayor que cero."
-            if inciso not in FORMULARIO_RENTA_CASILLAS[formulario_esperado]:
-                return f"La casilla {inciso} no está definida para el Formulario {formulario_esperado}."
+        if not inciso_formulario:
+            return "La referencia/casilla DNIT es obligatoria cuando se selecciona el Formulario 500 o 501."
+        try:
+            inciso = int(inciso_formulario)
+        except ValueError:
+            return "La referencia/casilla del Formulario 500/501 debe ser numérica."
+        if inciso <= 0:
+            return "La referencia/casilla del Formulario 500/501 debe ser mayor que cero."
+        if inciso not in FORMULARIO_RENTA_CASILLAS[formulario_esperado]:
+            return f"La casilla {inciso} no está definida para el Formulario {formulario_esperado}."
     elif inciso_formulario:
         return "El inciso/casilla de renta solo corresponde a los Formularios 500 y 501."
 
