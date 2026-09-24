@@ -2571,6 +2571,7 @@ def detalle_tiempo_cliente(cliente_id):
         actualizado_en TEXT DEFAULT (datetime('now')),
         concepto_flujo_efectivo TEXT DEFAULT NULL,
         formulario_impuesto TEXT DEFAULT NULL,
+        inciso_formulario TEXT DEFAULT NULL,
         FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_codigo ON cuentas_contables(codigo)")
@@ -2867,7 +2868,7 @@ def actualizar_cuenta_contable(cuenta_id):
             fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id IS NULL",(cuenta_id,)).fetchone()
         else:
             conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
-                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,actualizado_en=CURRENT_TIMESTAMP
+                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,inciso_formulario=?,actualizado_en=CURRENT_TIMESTAMP
                             WHERE id=? AND cliente_id=?""",values+(cliente_id,))
             fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id)).fetchone()
         conn.commit(); conn.close()
