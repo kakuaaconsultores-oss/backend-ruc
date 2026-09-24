@@ -171,10 +171,15 @@ RATE_LIMITS = {
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_BYTES
-CORS_ORIGINS = [o.strip() for o in os.environ.get(
-    "CORS_ORIGINS",
-    "https://kakuaaconsultores-oss.github.io,http://localhost:5500,http://127.0.0.1:5500"
-).split(",") if o.strip()]
+CORS_ORIGINS = [
+    "https://kakuaaconsultores-oss.github.io",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
+]
+CORS_ORIGINS.extend(
+    o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",")
+    if o.strip() and o.strip() not in CORS_ORIGINS
+)
 CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}}, supports_credentials=True, expose_headers=["Content-Disposition"])
 
 # Configuración SMTP (se lee de variables de entorno de Render)
