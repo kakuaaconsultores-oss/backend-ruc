@@ -527,12 +527,49 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            campos=["ruc","razon_social","nombre_comercial","documento","correo","telefono","direccion","condicion_compra_id","forma_pago_id","cuenta_contable_id","estado"]
-            sets=", ".join(f"{x}=?" for x in campos)
-            vals=[d.get(x) for x in campos]+[cid,proveedor_id]
-            conn.execute(f"UPDATE proveedores SET {sets}, actualizado_en=CAST(CURRENT_TIMESTAMP AS TEXT) WHERE cliente_id=? AND id=?",vals); conn.commit()
+            row=conn.execute("SELECT * FROM proveedores WHERE id=? AND cliente_id=?",(proveedor_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Proveedor no encontrado."}),404
+
+            campos=["ruc","razon_social","nombre_comercial","documento","correo","telefono","direccion"]
+            updates=[]; vals=[]
+            for campo in campos:
+                if campo in d:
+                    updates.append(campo+"=?")
+                    vals.append(d.get(campo))
+
+            if not updates:
+                return jsonify({"error":"No se recibieron datos para actualizar."}),400
+
+            ruc=(d.get("ruc") if "ruc" in d else row["ruc"]) or ""
+            ruc=str(ruc).strip().upper()
+            if not ruc:
+                return jsonify({"error":"El RUC es obligatorio."}),400
+
+            existente=conn.execute(
+                "SELECT id FROM proveedores WHERE cliente_id=? AND UPPER(ruc)=? AND id<>?",
+                (cid,ruc,proveedor_id)
+            ).fetchone()
+            if existente:
+                return jsonify({"error":"Ya existe otro proveedor con ese RUC."}),409
+
+            if "ruc" in d:
+                for i,cambio in enumerate(updates):
+                    if cambio=="ruc=?":
+                        vals[i]=ruc
+                        break
+
+            vals += [cid,proveedor_id]
+            conn.execute(
+                "UPDATE proveedores SET "+", ".join(updates)+", actualizado_en=CAST(CURRENT_TIMESTAMP AS TEXT) WHERE cliente_id=? AND id=?",
+                vals
+            )
+            conn.commit()
             return jsonify({"ok":True})
-        finally: conn.close()
+        except Exception as e:
+            conn.rollback()
+            return jsonify({"error":str(e)}),400
+        finally:
+            conn.close()
 
     @app.get("/api/compras/comprobantes")
     @usuario_required
