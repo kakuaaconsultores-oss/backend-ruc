@@ -43,16 +43,16 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             conn.execute(f"""CREATE TABLE IF NOT EXISTS tipos_comprobante_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
-                nombre TEXT NOT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
+                nombre TEXT NOT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS condiciones_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'dias', dias_credito INTEGER NOT NULL DEFAULT 0, cuotas INTEGER NOT NULL DEFAULT 1, activo INTEGER NOT NULL DEFAULT 1,
-                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(cliente_id,codigo))""")
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
-                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
+                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(cliente_id,codigo))""")
             # Estas columnas ya forman parte del CREATE TABLE. Solo se agregan
             # cuando la base existente proviene de una versión anterior.
@@ -78,7 +78,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 correo TEXT DEFAULT '', telefono TEXT DEFAULT '', direccion TEXT DEFAULT '',
                 condicion_compra_id INTEGER DEFAULT NULL, forma_pago_id INTEGER DEFAULT NULL,
                 cuenta_contable_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'activo',
-                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedores_cliente ON proveedores(cliente_id, estado, razon_social)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedor_timbrados (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
@@ -87,19 +87,19 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 numero_desde INTEGER NOT NULL DEFAULT 1, numero_hasta INTEGER NOT NULL DEFAULT 1,
                 fecha_inicio TEXT DEFAULT NULL, fecha_vencimiento TEXT DEFAULT NULL,
                 activo INTEGER NOT NULL DEFAULT 1, observacion TEXT DEFAULT '',
-                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedor_timbrados ON proveedor_timbrados(cliente_id, proveedor_id, activo)")
 
             conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
                 cuenta_contable_id INTEGER DEFAULT NULL, tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
-                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(cliente_id,codigo))""")
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, fecha_entrega TEXT DEFAULT NULL, condicion_id INTEGER DEFAULT NULL,
                 forma_pago_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
-                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
@@ -112,8 +112,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 gravado_10 REAL DEFAULT 0, gravado_5 REAL DEFAULT 0, exento REAL DEFAULT 0,
                 iva_10 REAL DEFAULT 0, iva_5 REAL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
                 orden_compra_id INTEGER DEFAULT NULL, timbrado_id INTEGER DEFAULT NULL, origen TEXT DEFAULT 'MANUAL',
-                observacion TEXT DEFAULT '', creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
-                actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                observacion TEXT DEFAULT '', creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             if not _column_exists("comprobantes_compra", "timbrado_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
@@ -127,17 +127,17 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
                 saldo REAL NOT NULL DEFAULT 0, estado TEXT NOT NULL DEFAULT 'pendiente',
-                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(comprobante_id,numero_cuota))""")
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(comprobante_id,numero_cuota))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
                 motivo TEXT DEFAULT '', estado TEXT NOT NULL DEFAULT 'registrado', creado_por INTEGER,
-                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
                 forma_pago_id INTEGER, total REAL NOT NULL DEFAULT 0, observacion TEXT DEFAULT '',
-                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
                 concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0)""")
@@ -153,7 +153,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
-                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             clientes = conn.execute("SELECT id FROM clientes").fetchall()
             for cliente in clientes:
                 cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
