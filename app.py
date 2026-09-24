@@ -3003,6 +3003,117 @@ def anular_asiento_contable(asiento_id):
     conn.commit(); conn.close()
     return jsonify({"ok":True})
 
+# ==================== IMPORTACIÓN Y PLANTILLAS DE PLAN DE CUENTAS ====================
+
+@app.route("/api/contabilidad/cuentas/plantilla", methods=["GET"])
+@admin_required
+def descargar_plantilla_cuentas():
+    wb=Workbook()
+    ws=wb.active; ws.title="Plan de Cuentas"
+    headers=["CODIGO","NOMBRE","TIPO","NATURALEZA","NIVEL","CUENTA_PADRE_CODIGO","IMPUTABLE","CONCEPTO_FLUJO_EFECTIVO","FORMULARIO_IMPUESTO","INCISO_FORMULARIO"]
+    ws.append(headers)
+    ejemplos=[
+        ["1","ACTIVO","activo","deudora",1,"","NO","1.05","NO_APLICA",""],
+        ["1.01","ACTIVO CORRIENTE","activo","deudora",2,"1","NO","1.05","NO_APLICA",""],
+        ["1.01.01","CAJA","activo","deudora",3,"1.01","SI","1.01","NO_APLICA",""],
+        ["4.01","VENTAS","ingreso","acreedora",2,"4","SI","1.01","500","10"],
+    ]
+    for row in ejemplos: ws.append(row)
+    for cell in ws[1]:
+        cell.font=Font(bold=True); cell.alignment=Alignment(horizontal="center")
+    widths=[16,38,16,16,10,24,12,68,20,20]
+    for i,w in enumerate(widths,1): ws.column_dimensions[chr(64+i)].width=w
+    ws.freeze_panes="A2"; ws.auto_filter.ref=f"A1:J{ws.max_row}"
+    info=wb.create_sheet("INSTRUCCIONES")
+    instructions=[
+        ["CAMPO","REGLA"],
+        ["CODIGO","Obligatorio y único dentro del contexto."],
+        ["NOMBRE","Obligatorio."],
+        ["TIPO","activo, pasivo, patrimonio, ingreso, costo o gasto."],
+        ["NATURALEZA","deudora o acreedora."],
+        ["NIVEL","Número entero mayor o igual a 1."],
+        ["CUENTA_PADRE_CODIGO","Código de la cuenta padre. Debe ser no imputable."],
+        ["IMPUTABLE","SI o NO. Solo las imputables pueden recibir movimientos."],
+        ["CONCEPTO_FLUJO_EFECTIVO","Usá uno de los códigos 1.01 a 3.04 o 4 definidos por Kakuaa."],
+        ["FORMULARIO_IMPUESTO","En cliente IRE se valida automáticamente contra 500/501. En Kakuaa general usar NO_APLICA."],
+        ["INCISO_FORMULARIO","Solo para cuentas imputables IRE 500/501; debe corresponder a una casilla válida."],
+    ]
+    instructions.forEach ? null : null;
+    for(const row of instructions) info.append(row);
+    for(const cell of info[1]) cell.font=Font(bold=True)
+    info.column_dimensions["A"].width=28; info.column_dimensions["B"].width=100;
+    const output=io.BytesIO(); wb.save(output); output.seek(0);
+    from flask import send_file
+    return send_file(output,as_attachment=True,download_name="Kakuaa_Plantilla_Plan_de_Cuentas.xlsx",mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+@app.route("/api/contabilidad/cuentas/importar", methods=["POST"])
+@admin_required
+def importar_cuentas_contables():
+    cliente_id,error_ctx=obtener_contexto_cuenta()
+    if error_ctx: return error_ctx
+    archivo=request.files.get("archivo")
+    if not archivo: return jsonify({"error":"Subí un archivo Excel (.xlsx)."}),400
+    try:
+        wb=__import__("openpyxl").load_workbook(archivo, data_only=True)
+        ws=wb.active
+    except Exception:
+        return jsonify({"error":"No se pudo leer el Excel. Usá la plantilla oficial de Kakuaa."}),400
+    required=["CODIGO","NOMBRE","TIPO","NATURALEZA","NIVEL","CUENTA_PADRE_CODIGO","IMPUTABLE","CONCEPTO_FLUJO_EFECTIVO","FORMULARIO_IMPUESTO","INCISO_FORMULARIO"]
+    headers=[str(x.value or "").strip().upper() for x in ws[1]]
+    idx={h:i for i,h in enumerate(headers)}
+    missing=[h for h in required if h not in idx]
+    if missing: return jsonify({"error":"Faltan columnas: "+", ".join(missing)}),400
+    rows=[]
+    for rn,row in enumerate(ws.iter_rows(min_row=2, values_only=True),2):
+        if not any(v not in (None,"") for v in row): continue
+        def val(k): return row[idx[k]] if idx[k] < len(row) else ""
+        try:
+            nivel=int(val("NIVEL"))
+        except (TypeError,ValueError):
+            return jsonify({"error":f"Fila {rn}: NIVEL debe ser numérico."}),400
+        imputable=str(val("IMPUTABLE") or "").strip().upper() in {"SI","SÍ","1","TRUE","X"}
+        parent_code=str(val("CUENTA_PADRE_CODIGO") or "").strip() or None
+        rows.append({"fila":rn,"codigo":str(val("CODIGO") or "").strip(),"nombre":str(val("NOMBRE") or "").strip(),
+            "tipo":str(val("TIPO") or "").strip().lower(),"naturaleza":str(val("NATURALEZA") or "").strip().lower(),
+            "nivel":nivel,"cuenta_padre_codigo":parent_code,"imputable":imputable,
+            "concepto_flujo_efectivo":str(val("CONCEPTO_FLUJO_EFECTIVO") or "").strip(),
+            "formulario_impuesto":str(val("FORMULARIO_IMPUESTO") or "").strip().upper(),
+            "inciso_formulario":str(val("INCISO_FORMULARIO") or "").strip()})
+    if not rows: return jsonify({"error":"El Excel no contiene cuentas para importar."}),400
+    codes=set()
+    for r in rows:
+        if not r["codigo"]: return jsonify({"error":f"Fila {r['fila']}: CODIGO es obligatorio."}),400
+        if r["codigo"] in codes: return jsonify({"error":f"Fila {r['fila']}: código duplicado dentro del archivo: {r['codigo']}."}),400
+        codes.add(r["codigo"])
+    conn=get_db()
+    try:
+        existing=conn.execute("SELECT codigo FROM cuentas_contables WHERE "+("cliente_id IS NULL" if cliente_id is None else "cliente_id = ?"), (() if cliente_id is None else (cliente_id,))).fetchall()
+        existing_codes={str(x["codigo"]) for x in existing}
+        for r in sorted(rows,key=lambda x:(x["nivel"],x["codigo"])):
+            if r["codigo"] in existing_codes:
+                raise ValueError(f"Fila {r['fila']}: ya existe la cuenta {r['codigo']} en este contexto.")
+            parent_id=None
+            if r["cuenta_padre_codigo"]:
+                parent=conn.execute("SELECT id,imputable FROM cuentas_contables WHERE codigo=? AND "+("cliente_id IS NULL" if cliente_id is None else "cliente_id=?"), ((r["cuenta_padre_codigo"],) if cliente_id is None else (r["cuenta_padre_codigo"],cliente_id))).fetchone()
+                if not parent:
+                    raise ValueError(f"Fila {r['fila']}: no existe la cuenta padre {r['cuenta_padre_codigo']}.")
+                parent_id=parent["id"]
+            data={k:r[k] for k in ("codigo","nombre","tipo","naturaleza","nivel","imputable","concepto_flujo_efectivo","formulario_impuesto","inciso_formulario")}
+            data["cuenta_padre_id"]=parent_id
+            if cliente_id is None: data["formulario_impuesto"]="NO_APLICA"; data["inciso_formulario"]=""
+            err=_validar_cuenta_contable(data,conn,cliente_id)
+            if err: raise ValueError(f"Fila {r['fila']}: {err}")
+            conn.execute("""INSERT INTO cuentas_contables
+                (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa,concepto_flujo_efectivo,formulario_impuesto,inciso_formulario)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (cliente_id,r["codigo"],r["nombre"],"",r["tipo"],r["naturaleza"],r["nivel"],parent_id,1 if r["imputable"] else 0,1,r["concepto_flujo_efectivo"],data["formulario_impuesto"],r["inciso_formulario"] if r["imputable"] else None))
+            existing_codes.add(r["codigo"])
+        conn.commit()
+        return jsonify({"ok":True,"importadas":len(rows)})
+    except (ValueError,DB_INTEGRITY_ERROR) as e:
+        conn.rollback(); return jsonify({"error":str(e) or "No se pudo importar el plan de cuentas."}),400
+    finally: conn.close()
+
 # ==================== REPORTES CONTABLES ====================
 
 def _construir_flujo_efectivo(conn, cliente_id, desde, hasta, saldo_inicial=0):
