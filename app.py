@@ -2496,6 +2496,7 @@ def detalle_tiempo_cliente(cliente_id):
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_codigo ON cuentas_contables(codigo)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_padre ON cuentas_contables(cuenta_padre_id)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_global_codigo ON cuentas_contables(codigo) WHERE cliente_id IS NULL")
     for col, definition in [
         ("concepto_flujo_efectivo", "TEXT DEFAULT NULL"),
         ("formulario_impuesto", "TEXT DEFAULT NULL")
