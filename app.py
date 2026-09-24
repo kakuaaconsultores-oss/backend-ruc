@@ -557,10 +557,15 @@ def init_db_postgres():
             activa INTEGER NOT NULL DEFAULT 1,
             creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
             actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            concepto_flujo_efectivo TEXT DEFAULT NULL,
+            formulario_impuesto TEXT DEFAULT NULL,
             FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
         )""")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_cliente_codigo ON cuentas_contables(cliente_id, codigo)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_cliente ON cuentas_contables(cliente_id, codigo)")
+        conn.execute("ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS concepto_flujo_efectivo TEXT DEFAULT NULL")
+        conn.execute("ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS formulario_impuesto TEXT DEFAULT NULL")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_global_codigo ON cuentas_contables(codigo) WHERE cliente_id IS NULL")
         conn.execute("""CREATE TABLE IF NOT EXISTS periodos_contables (
             id BIGSERIAL PRIMARY KEY,
             cliente_id BIGINT DEFAULT NULL REFERENCES clientes(id),
@@ -2485,10 +2490,20 @@ def detalle_tiempo_cliente(cliente_id):
         activa INTEGER NOT NULL DEFAULT 1,
         creado_en TEXT DEFAULT (datetime('now')),
         actualizado_en TEXT DEFAULT (datetime('now')),
+        concepto_flujo_efectivo TEXT DEFAULT NULL,
+        formulario_impuesto TEXT DEFAULT NULL,
         FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_codigo ON cuentas_contables(codigo)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_padre ON cuentas_contables(cuenta_padre_id)")
+    for col, definition in [
+        ("concepto_flujo_efectivo", "TEXT DEFAULT NULL"),
+        ("formulario_impuesto", "TEXT DEFAULT NULL")
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE cuentas_contables ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass
 
     conn.execute("""CREATE TABLE IF NOT EXISTS periodos_contables (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
