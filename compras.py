@@ -52,12 +52,24 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
                 activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
                 UNIQUE(cliente_id,codigo))""")
-            try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN tipo TEXT NOT NULL DEFAULT 'dias'")
-            except Exception: pass
-            try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN cuotas INTEGER NOT NULL DEFAULT 1")
-            except Exception: pass
-            try: conn.execute("ALTER TABLE formas_pago_compra ADD COLUMN cuenta_contable_id INTEGER")
-            except Exception: pass
+            # Estas columnas ya forman parte del CREATE TABLE. Solo se agregan
+            # cuando la base existente proviene de una versión anterior.
+            def _column_exists(table, column):
+                if os.environ.get("DATABASE_URL"):
+                    return bool(conn.execute(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema=current_schema() AND table_name=? AND column_name=?",
+                        (table, column)
+                    ).fetchone())
+                return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+            for table, column, definition in (
+                ("condiciones_compra", "tipo", "TEXT NOT NULL DEFAULT 'dias'"),
+                ("condiciones_compra", "cuotas", "INTEGER NOT NULL DEFAULT 1"),
+                ("formas_pago_compra", "cuenta_contable_id", "INTEGER"),
+            ):
+                if not _column_exists(table, column):
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
                 razon_social TEXT NOT NULL, nombre_comercial TEXT DEFAULT '', documento TEXT DEFAULT '',
@@ -115,10 +127,14 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
                 concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0)""")
-            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN cuota_id INTEGER")
-            except Exception: pass
-            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN monto_aplicado REAL NOT NULL DEFAULT 0")
-            except Exception: pass
+            for column, definition in (
+                ("cuota_id", "INTEGER"),
+                ("monto_aplicado", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if not _column_exists("ordenes_pago_detalle", column):
+                    conn.execute(
+                        f"ALTER TABLE ordenes_pago_detalle ADD COLUMN {column} {definition}"
+                    )
             conn.execute(f"""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
@@ -130,8 +146,11 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 existe = conn.execute("SELECT 1 FROM tipos_comprobante_compra WHERE cliente_id=? LIMIT 1", (cliente_id,)).fetchone()
                 if not existe:
                     for code,name,active in TIPOS_COMPROBANTE_DEFAULT:
-                        try: conn.execute("INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) VALUES(?,?,?,?)", (cliente_id,code,name,active))
-                        except Exception: pass
+                        conn.execute(
+                            "INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) "
+                            "VALUES(?,?,?,?) ON CONFLICT (cliente_id,codigo) DO NOTHING",
+                            (cliente_id,code,name,active)
+                        )
             conn.commit()
         finally: conn.close()
     init_compras()
