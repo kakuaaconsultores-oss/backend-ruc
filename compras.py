@@ -69,7 +69,6 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 ("condiciones_compra", "tipo", "TEXT NOT NULL DEFAULT 'dias'"),
                 ("condiciones_compra", "cuotas", "INTEGER NOT NULL DEFAULT 1"),
                 ("formas_pago_compra", "cuenta_contable_id", "INTEGER"),
-                ("comprobantes_compra", "timbrado_id", "INTEGER"),
             ):
                 if not _column_exists(table, column):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -112,9 +111,11 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 estado TEXT NOT NULL DEFAULT 'registrado', moneda TEXT NOT NULL DEFAULT 'PYG',
                 gravado_10 REAL DEFAULT 0, gravado_5 REAL DEFAULT 0, exento REAL DEFAULT 0,
                 iva_10 REAL DEFAULT 0, iva_5 REAL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
-                orden_compra_id INTEGER DEFAULT NULL, origen TEXT DEFAULT 'MANUAL',
+                orden_compra_id INTEGER DEFAULT NULL, timbrado_id INTEGER DEFAULT NULL, origen TEXT DEFAULT 'MANUAL',
                 observacion TEXT DEFAULT '', creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
                 actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
+            if not _column_exists("comprobantes_compra", "timbrado_id"):
+                conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
