@@ -417,6 +417,47 @@ def init_db():
                 )
 
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_usuarios_superadmin ON usuarios(rol) WHERE rol = 'superadmin'")
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ruc TEXT UNIQUE NOT NULL,
+        dv TEXT DEFAULT '',
+        razon_social TEXT NOT NULL,
+        nombre_comercial TEXT DEFAULT '',
+        tipo_persona TEXT NOT NULL DEFAULT 'juridica',
+        documento TEXT DEFAULT '',
+        correo TEXT DEFAULT '',
+        telefono TEXT DEFAULT '',
+        direccion TEXT DEFAULT '',
+        estado TEXT NOT NULL DEFAULT 'activo',
+        creado_por INTEGER,
+        creado_en TEXT DEFAULT (datetime('now')),
+        actualizado_en TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (creado_por) REFERENCES usuarios(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cliente_id INTEGER NOT NULL,
+        codigo TEXT NOT NULL,
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT DEFAULT (datetime('now')),
+        UNIQUE(cliente_id, codigo),
+        FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cliente_obligaciones_cliente ON cliente_obligaciones(cliente_id, activo)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS usuario_clientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario_id INTEGER NOT NULL,
+        cliente_id INTEGER NOT NULL,
+        creado_en TEXT DEFAULT (datetime('now')),
+        UNIQUE(usuario_id, cliente_id),
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+        FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_usuario ON usuario_clientes(usuario_id, cliente_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_cliente ON usuario_clientes(cliente_id, usuario_id)")
     conn.commit()
     conn.close()
 
@@ -457,6 +498,43 @@ def init_db_postgres():
             if superadmin["usuario"] in placeholders or not str(superadmin["usuario"] or "").strip():
                 conflicto=conn.execute("SELECT id FROM usuarios WHERE usuario = ? AND id != ?", (usuario_configurado, superadmin["id"])).fetchone()
                 if not conflicto: conn.execute("UPDATE usuarios SET usuario = ? WHERE id = ?", (usuario_configurado, superadmin["id"]))
+
+        conn.execute("""CREATE TABLE IF NOT EXISTS clientes (
+            id BIGSERIAL PRIMARY KEY,
+            ruc TEXT UNIQUE NOT NULL,
+            dv TEXT DEFAULT '',
+            razon_social TEXT NOT NULL,
+            nombre_comercial TEXT DEFAULT '',
+            tipo_persona TEXT NOT NULL DEFAULT 'juridica',
+            documento TEXT DEFAULT '',
+            correo TEXT DEFAULT '',
+            telefono TEXT DEFAULT '',
+            direccion TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'activo',
+            creado_por BIGINT REFERENCES usuarios(id),
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
+            id BIGSERIAL PRIMARY KEY,
+            cliente_id BIGINT NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+            codigo TEXT NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            UNIQUE(cliente_id, codigo)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cliente_obligaciones_cliente ON cliente_obligaciones(cliente_id, activo)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS usuario_clientes (
+            id BIGSERIAL PRIMARY KEY,
+            usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+            cliente_id BIGINT NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+            creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            UNIQUE(usuario_id, cliente_id)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_usuario ON usuario_clientes(usuario_id, cliente_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_cliente ON usuario_clientes(cliente_id, usuario_id)")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -670,6 +748,227 @@ def rate_limit_response():
         "error": "Demasiadas solicitudes. Esperá un momento e intentá nuevamente.",
         "rate_limited": True
     }), 429
+
+
+# ---------- CONTEXTO MULTI-CLIENTE ----------
+
+CLIENTE_TIPOS = {"juridica", "fisica"}
+CLIENTE_OBLIGACIONES_VALIDAS = {"IVA", "IRP", "IRE", "IDU"}
+
+def _cliente_obligaciones(conn, cliente_id):
+    filas = conn.execute(
+        "SELECT codigo FROM cliente_obligaciones WHERE cliente_id = ? AND activo = 1 ORDER BY codigo",
+        (cliente_id,)
+    ).fetchall()
+    return [str(f["codigo"]) for f in filas]
+
+def _cliente_dict(conn, fila):
+    obligaciones = _cliente_obligaciones(conn, fila["id"])
+    tipo = str(fila["tipo_persona"] or "juridica").lower()
+    perfil = "PERSONA_JURIDICA" if tipo == "juridica" else (
+        "PERSONA_FISICA_IVA_IRP" if "IVA" in obligaciones and "IRP" in obligaciones
+        else "PERSONA_FISICA_IRP" if "IRP" in obligaciones
+        else "PERSONA_FISICA"
+    )
+    return {
+        "id": fila["id"],
+        "ruc": fila["ruc"],
+        "dv": fila["dv"] or "",
+        "razon_social": fila["razon_social"],
+        "nombre_comercial": fila["nombre_comercial"] or "",
+        "tipo_persona": tipo,
+        "documento": fila["documento"] or "",
+        "correo": fila["correo"] or "",
+        "telefono": fila["telefono"] or "",
+        "direccion": fila["direccion"] or "",
+        "estado": fila["estado"],
+        "obligaciones": obligaciones,
+        "perfil": perfil,
+        "creado_en": fila["creado_en"],
+        "actualizado_en": fila["actualizado_en"],
+    }
+
+def _puede_acceder_cliente(conn, usuario, cliente_id):
+    if usuario["rol"] in ("superadmin", "admin"):
+        return True
+    fila = conn.execute(
+        """SELECT 1 FROM usuario_clientes
+           WHERE usuario_id = ? AND cliente_id = ?""",
+        (usuario["id"], cliente_id)
+    ).fetchone()
+    return bool(fila)
+
+@app.route("/api/clientes", methods=["GET"])
+@staff_required
+def listar_clientes():
+    usuario = obtener_usuario_por_token()
+    conn = get_db()
+    if usuario["rol"] in ("superadmin", "admin"):
+        filas = conn.execute(
+            "SELECT * FROM clientes WHERE estado = 'activo' ORDER BY razon_social"
+        ).fetchall()
+    else:
+        filas = conn.execute(
+            """SELECT c.* FROM clientes c
+               INNER JOIN usuario_clientes uc ON uc.cliente_id = c.id
+               WHERE uc.usuario_id = ? AND c.estado = 'activo'
+               ORDER BY c.razon_social""",
+            (usuario["id"],)
+        ).fetchall()
+    resultado = [_cliente_dict(conn, f) for f in filas]
+    conn.close()
+    return jsonify(resultado)
+
+@app.route("/api/clientes/<int:cliente_id>", methods=["GET"])
+@staff_required
+def obtener_cliente(cliente_id):
+    usuario = obtener_usuario_por_token()
+    conn = get_db()
+    fila = conn.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+    if not fila:
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado."}), 404
+    if not _puede_acceder_cliente(conn, usuario, cliente_id):
+        conn.close()
+        return jsonify({"error": "No tenés acceso a este cliente."}), 403
+    resultado = _cliente_dict(conn, fila)
+    conn.close()
+    return jsonify(resultado)
+
+@app.route("/api/clientes", methods=["POST"])
+@admin_required
+def crear_cliente():
+    usuario = obtener_usuario_por_token()
+    data = request.get_json() or {}
+    ruc = str(data.get("ruc", "")).strip()
+    dv = str(data.get("dv", "")).strip()
+    razon = str(data.get("razon_social", "")).strip()
+    nombre_comercial = str(data.get("nombre_comercial", "")).strip()
+    tipo = str(data.get("tipo_persona", "juridica")).strip().lower()
+    documento = str(data.get("documento", "")).strip()
+    correo = str(data.get("correo", "")).strip()
+    telefono = str(data.get("telefono", "")).strip()
+    direccion = str(data.get("direccion", "")).strip()
+    obligaciones = data.get("obligaciones") or []
+
+    if not ruc or not razon:
+        return jsonify({"error": "RUC y razón social son obligatorios."}), 400
+    if tipo not in CLIENTE_TIPOS:
+        return jsonify({"error": "El tipo de persona no es válido."}), 400
+    if not isinstance(obligaciones, list):
+        return jsonify({"error": "Las obligaciones deben enviarse como una lista."}), 400
+    obligaciones = sorted(set(str(x).strip().upper() for x in obligaciones if str(x).strip()))
+    invalidas = [x for x in obligaciones if x not in CLIENTE_OBLIGACIONES_VALIDAS]
+    if invalidas:
+        return jsonify({"error": "Obligación no válida: " + ", ".join(invalidas)}), 400
+
+    conn = get_db()
+    try:
+        nuevo_id = insertar_y_obtener_id(
+            conn,
+            """INSERT INTO clientes
+               (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?)""",
+            (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"])
+        )
+        for codigo in obligaciones:
+            conn.execute(
+                "INSERT INTO cliente_obligaciones (cliente_id, codigo, activo) VALUES (?, ?, 1)",
+                (nuevo_id, codigo)
+            )
+        conn.execute(
+            "INSERT INTO usuario_clientes (usuario_id, cliente_id) VALUES (?, ?) ON CONFLICT DO NOTHING"
+            if DB_BACKEND == "postgres"
+            else "INSERT OR IGNORE INTO usuario_clientes (usuario_id, cliente_id) VALUES (?, ?)",
+            (usuario["id"], nuevo_id)
+        )
+        conn.commit()
+        fila = conn.execute("SELECT * FROM clientes WHERE id = ?", (nuevo_id,)).fetchone()
+        resultado = _cliente_dict(conn, fila)
+        return jsonify(resultado), 201
+    except DB_INTEGRITY_ERROR:
+        conn.rollback()
+        return jsonify({"error": "Ya existe un cliente con ese RUC."}), 409
+    finally:
+        conn.close()
+
+@app.route("/api/clientes/<int:cliente_id>", methods=["PUT"])
+@admin_required
+def actualizar_cliente(cliente_id):
+    data = request.get_json() or {}
+    razon = str(data.get("razon_social", "")).strip()
+    ruc = str(data.get("ruc", "")).strip()
+    if not razon or not ruc:
+        return jsonify({"error": "RUC y razón social son obligatorios."}), 400
+    tipo = str(data.get("tipo_persona", "juridica")).strip().lower()
+    if tipo not in CLIENTE_TIPOS:
+        return jsonify({"error": "El tipo de persona no es válido."}), 400
+    obligaciones = data.get("obligaciones") or []
+    if not isinstance(obligaciones, list):
+        return jsonify({"error": "Las obligaciones deben enviarse como una lista."}), 400
+    obligaciones = sorted(set(str(x).strip().upper() for x in obligaciones if str(x).strip()))
+    if any(x not in CLIENTE_OBLIGACIONES_VALIDAS for x in obligaciones):
+        return jsonify({"error": "Hay una obligación no válida."}), 400
+
+    conn = get_db()
+    try:
+        existe = conn.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+        if not existe:
+            return jsonify({"error": "Cliente no encontrado."}), 404
+        conn.execute(
+            """UPDATE clientes SET ruc = ?, dv = ?, razon_social = ?, nombre_comercial = ?,
+               tipo_persona = ?, documento = ?, correo = ?, telefono = ?, direccion = ?,
+               actualizado_en = CURRENT_TIMESTAMP WHERE id = ?""",
+            (ruc, str(data.get("dv", "")).strip(), razon, str(data.get("nombre_comercial", "")).strip(),
+             tipo, str(data.get("documento", "")).strip(), str(data.get("correo", "")).strip(),
+             str(data.get("telefono", "")).strip(), str(data.get("direccion", "")).strip(), cliente_id)
+        )
+        conn.execute("DELETE FROM cliente_obligaciones WHERE cliente_id = ?", (cliente_id,))
+        for codigo in obligaciones:
+            conn.execute("INSERT INTO cliente_obligaciones (cliente_id, codigo, activo) VALUES (?, ?, 1)", (cliente_id, codigo))
+        conn.commit()
+        fila = conn.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+        resultado = _cliente_dict(conn, fila)
+        return jsonify(resultado)
+    except DB_INTEGRITY_ERROR:
+        conn.rollback()
+        return jsonify({"error": "Ya existe otro cliente con ese RUC."}), 409
+    finally:
+        conn.close()
+
+@app.route("/api/clientes/<int:cliente_id>", methods=["DELETE"])
+@admin_required
+def desactivar_cliente(cliente_id):
+    conn = get_db()
+    try:
+        existe = conn.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+        if not existe:
+            return jsonify({"error": "Cliente no encontrado."}), 404
+        conn.execute(
+            "UPDATE clientes SET estado = 'inactivo', actualizado_en = CURRENT_TIMESTAMP WHERE id = ?",
+            (cliente_id,)
+        )
+        conn.commit()
+        return jsonify({"ok": True})
+    finally:
+        conn.close()
+
+@app.route("/api/clientes/contexto/<int:cliente_id>", methods=["GET"])
+@staff_required
+def seleccionar_cliente_contexto(cliente_id):
+    usuario = obtener_usuario_por_token()
+    conn = get_db()
+    fila = conn.execute("SELECT * FROM clientes WHERE id = ? AND estado = 'activo'", (cliente_id,)).fetchone()
+    if not fila:
+        conn.close()
+        return jsonify({"error": "Cliente no encontrado o inactivo."}), 404
+    if not _puede_acceder_cliente(conn, usuario, cliente_id):
+        conn.close()
+        return jsonify({"error": "No tenés acceso a este cliente."}), 403
+    resultado = _cliente_dict(conn, fila)
+    conn.close()
+    return jsonify({"ok": True, "cliente": resultado})
+
 
 # ---------- RUTAS ----------
 
