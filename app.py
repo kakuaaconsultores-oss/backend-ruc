@@ -933,15 +933,19 @@ def crear_cliente():
     correo = str(data.get("correo", "")).strip()
     telefono = str(data.get("telefono", "")).strip()
     direccion = str(data.get("direccion", "")).strip()
+    tipo_impuesto = str(data.get("tipo_impuesto", "")).strip().upper()
     obligaciones = data.get("obligaciones") or []
 
     if not ruc or not razon:
         return jsonify({"error": "RUC y razón social son obligatorios."}), 400
     if tipo not in CLIENTE_TIPOS:
         return jsonify({"error": "El tipo de persona no es válido."}), 400
+    if tipo_impuesto not in CLIENTE_IMPUESTOS_VALIDOS:
+        return jsonify({"error": "Seleccioná un tipo de impuesto válido."}), 400
     if not isinstance(obligaciones, list):
-        return jsonify({"error": "Las obligaciones deben enviarse como una lista."}), 400
-    obligaciones = sorted(set(str(x).strip().upper() for x in obligaciones if str(x).strip()))
+        obligaciones = []
+    obligacion_principal = "IVA" if tipo_impuesto == "IVA" else "IRP" if tipo_impuesto.startswith("IRP-") else "IRE"
+    obligaciones = sorted(set([str(x).strip().upper() for x in obligaciones if str(x).strip()] + [obligacion_principal]))
     invalidas = [x for x in obligaciones if x not in CLIENTE_OBLIGACIONES_VALIDAS]
     if invalidas:
         return jsonify({"error": "Obligación no válida: " + ", ".join(invalidas)}), 400
@@ -951,9 +955,9 @@ def crear_cliente():
         nuevo_id = insertar_y_obtener_id(
             conn,
             """INSERT INTO clientes
-               (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?)""",
-            (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"])
+               (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por, tipo_impuesto)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?, ?)""",
+            (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"], tipo_impuesto)
         )
         for codigo in obligaciones:
             conn.execute(
