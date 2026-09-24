@@ -3038,10 +3038,15 @@ def descargar_plantilla_cuentas():
         ["FORMULARIO_IMPUESTO","En cliente IRE se valida automáticamente contra 500/501. En Kakuaa general usar NO_APLICA."],
         ["INCISO_FORMULARIO","Solo para cuentas imputables IRE 500/501; debe corresponder a una casilla válida."],
     ]
-    for(const row of instructions) info.append(row);
-    for(const cell of info[1]) cell.font=Font(bold=True)
-    info.column_dimensions["A"].width=28; info.column_dimensions["B"].width=100;
-    const output=io.BytesIO(); wb.save(output); output.seek(0);
+    for row in instructions:
+        info.append(row);
+    for cell in info[1]:
+        cell.font=Font(bold=True)
+    info.column_dimensions["A"].width=28
+    info.column_dimensions["B"].width=100
+    output=io.BytesIO()
+    wb.save(output)
+    output.seek(0)
     from flask import send_file
     return send_file(output,as_attachment=True,download_name="Kakuaa_Plantilla_Plan_de_Cuentas.xlsx",mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
