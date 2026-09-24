@@ -2767,7 +2767,7 @@ def contabilizar_asiento_contable(asiento_id):
     if round(float(tot["debe"]),2) != round(float(tot["haber"]),2) or float(tot["debe"]) <= 0:
         conn.close(); return jsonify({"error":"El asiento debe estar cuadrado y tener importe antes de contabilizar."}),409
     u=obtener_usuario_por_token()
-    numero=conn.execute("SELECT COALESCE(MAX(numero),0)+1 AS n FROM asientos_contables WHERE cliente_id=? AND estado='contabilizado'").fetchone()["n"]
+    numero=conn.execute("SELECT COALESCE(MAX(numero),0)+1 AS n FROM asientos_contables WHERE cliente_id=? AND estado='contabilizado'",(cliente_id,)).fetchone()["n"]
     conn.execute("""UPDATE asientos_contables SET estado='contabilizado',numero=?,
                     usuario_contabilizador_id=?,contabilizado_en=CURRENT_TIMESTAMP,
                     actualizado_en=CURRENT_TIMESTAMP WHERE id=?""",(numero,u["id"],asiento_id))
