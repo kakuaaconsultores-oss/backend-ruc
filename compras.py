@@ -39,19 +39,19 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
     def init_compras():
         conn = get_db()
         try:
-            conn.execute("""CREATE TABLE IF NOT EXISTS tipos_comprobante_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS tipos_comprobante_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(cliente_id,codigo))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS condiciones_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS condiciones_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, dias_credito INTEGER NOT NULL DEFAULT 0, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS formas_pago_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS proveedores (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
                 razon_social TEXT NOT NULL, nombre_comercial TEXT DEFAULT '', documento TEXT DEFAULT '',
                 correo TEXT DEFAULT '', telefono TEXT DEFAULT '', direccion TEXT DEFAULT '',
@@ -59,22 +59,22 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cuenta_contable_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'activo',
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedores_cliente ON proveedores(cliente_id, estado, razon_social)")
-            conn.execute("""CREATE TABLE IF NOT EXISTS conceptos_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
                 cuenta_contable_id INTEGER DEFAULT NULL, tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS ordenes_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, fecha_entrega TEXT DEFAULT NULL, condicion_id INTEGER DEFAULT NULL,
                 forma_pago_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
                 observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY(orden_id) REFERENCES ordenes_compra(id) ON DELETE CASCADE)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS comprobantes_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 tipo_comprobante_id INTEGER, numero TEXT NOT NULL, cdc TEXT DEFAULT '', fecha TEXT NOT NULL,
                 condicion_id INTEGER DEFAULT NULL, forma_pago_id INTEGER DEFAULT NULL,
@@ -86,27 +86,27 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
-            conn.execute("""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
                 id {id_col} PRIMARY KEY, comprobante_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
                 cuenta_contable_id INTEGER DEFAULT NULL,
                 FOREIGN KEY(comprobante_id) REFERENCES comprobantes_compra(id) ON DELETE CASCADE)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS notas_compra (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
                 motivo TEXT DEFAULT '', estado TEXT NOT NULL DEFAULT 'registrado', creado_por INTEGER,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS ordenes_pago (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
                 forma_pago_id INTEGER, total REAL NOT NULL DEFAULT 0, observacion TEXT DEFAULT '',
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
                 concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0,
                 FOREIGN KEY(orden_pago_id) REFERENCES ordenes_pago(id) ON DELETE CASCADE)""")
-            conn.execute("""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
