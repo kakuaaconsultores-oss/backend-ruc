@@ -3003,6 +3003,48 @@ def anular_asiento_contable(asiento_id):
 
 # ==================== REPORTES CONTABLES ====================
 
+def _construir_flujo_efectivo(conn, cliente_id, desde, hasta, saldo_inicial=0):
+    filas = conn.execute("""
+        SELECT c.concepto_flujo_efectivo AS codigo,
+               COALESCE(SUM(d.debe - d.haber), 0) AS importe
+        FROM detalle_asientos d
+        JOIN asientos_contables a ON a.id = d.asiento_id
+        JOIN cuentas_contables c ON c.id = d.cuenta_id
+        WHERE a.cliente_id = ? AND a.estado = 'contabilizado'
+          AND a.fecha >= ? AND a.fecha <= ?
+          AND c.cliente_id = ? AND c.concepto_flujo_efectivo IS NOT NULL
+        GROUP BY c.concepto_flujo_efectivo
+    """, (cliente_id, desde, hasta, cliente_id)).fetchall()
+    valores={str(r["codigo"]): float(r["importe"] or 0) for r in filas}
+    op=sum(valores.get(k,0) for k in ("1.01","1.02","1.03","1.04","1.05","1.06"))
+    inv=sum(valores.get(k,0) for k in ("2.01","2.02","2.03"))
+    fin=sum(valores.get(k,0) for k in ("3.01","3.02","3.03","3.04"))
+    tc=valores.get("4",0)
+    neto=op+inv+fin+tc
+    return {"1":round(op,2),"2":round(inv,2),"3":round(fin,2),"4":round(tc,2),
+            "4.01":round(neto,2),"4.02":round(float(saldo_inicial or 0),2),"5":round(neto+float(saldo_inicial or 0),2),
+            "detalle":{k:round(valores.get(k,0),2) for k in FLUJO_EFECTIVO_CLASIFICACIONES}}
+
+@app.route("/api/contabilidad/reportes/flujo-efectivo", methods=["GET"])
+@admin_required
+def reporte_flujo_efectivo():
+    cliente_id,error_ctx=obtener_cliente_contable()
+    if error_ctx: return error_ctx
+    desde=str(request.args.get("desde","")).strip() or datetime.utcnow().strftime("%Y")+"-01-01"
+    hasta=str(request.args.get("hasta","")).strip() or datetime.utcnow().strftime("%Y")+"-12-31"
+    try:
+        datetime.strptime(desde,"%Y-%m-%d"); datetime.strptime(hasta,"%Y-%m-%d")
+        saldo=float(request.args.get("saldo_inicial","0") or 0)
+    except ValueError:
+        return jsonify({"error":"Fechas o saldo inicial inválidos."}),400
+    conn=get_db()
+    try:
+        cliente=conn.execute("SELECT razon_social,ruc,dv FROM clientes WHERE id=?",(cliente_id,)).fetchone()
+        return jsonify({"cliente":dict(cliente),"desde":desde,"hasta":hasta,"reporte":_construir_flujo_efectivo(conn,cliente_id,desde,hasta,saldo)})
+    finally: conn.close()
+
+
+
 def _renta_casillas(conn, cliente_id, formulario, desde, hasta):
     filas = conn.execute("""
         SELECT c.inciso_formulario AS inciso,
