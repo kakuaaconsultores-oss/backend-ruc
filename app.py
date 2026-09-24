@@ -2213,6 +2213,20 @@ def _detener_tarea_si_corresponde(conn, tarea_id, usuario_id=None):
 @admin_required
 def admin_dashboard():
     conn = get_db()
+    if DB_BACKEND == "postgres":
+        horas_expr = "(EXTRACT(EPOCH FROM (CAST(COALESCE({alias}.fin, CURRENT_TIMESTAMP::text) AS TIMESTAMP) - CAST({alias}.inicio AS TIMESTAMP))) / 3600.0)"
+        fecha_expr = "CAST({alias}.inicio AS DATE)"
+        costo_hora_subquery = """COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                      WHERE cp.usuario_id={alias}.usuario_id AND CAST(cp.vigencia_desde AS DATE) <= CAST({alias}.inicio AS DATE)
+                        AND (cp.vigencia_hasta IS NULL OR CAST(cp.vigencia_hasta AS DATE) >= CAST({alias}.inicio AS DATE))
+                      ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)"""
+    else:
+        horas_expr = "((julianday(COALESCE({alias}.fin, datetime('now'))) - julianday({alias}.inicio)) * 24.0)"
+        fecha_expr = "date({alias}.inicio)"
+        costo_hora_subquery = """COALESCE((SELECT cp.costo_hora FROM costos_persona cp
+                      WHERE cp.usuario_id={alias}.usuario_id AND cp.vigencia_desde <= date({alias}.inicio)
+                        AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date({alias}.inicio))
+                      ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)"""
     clientes = conn.execute("""
         SELECT COUNT(*) AS total,
                COALESCE(SUM(CASE WHEN activo = 1 THEN 1 ELSE 0 END),0) AS activos
@@ -2237,23 +2251,19 @@ def admin_dashboard():
                COALESCE(SUM(CASE WHEN estado = 'bloqueada' THEN 1 ELSE 0 END),0) AS bloqueadas
         FROM tareas
     """).fetchone()
-    horas = conn.execute("""
-        SELECT COALESCE(SUM((julianday(COALESCE(fin, datetime('now'))) - julianday(inicio)) * 24.0),0) AS horas
+    horas = conn.execute(f"""
+        SELECT COALESCE(SUM({horas_expr.format(alias='sesiones_trabajo')}),0) AS horas
         FROM sesiones_trabajo
     """).fetchone()
-    costo_total = conn.execute("""
+    costo_total = conn.execute(f"""
         SELECT COALESCE(SUM(
-            (julianday(COALESCE(s.fin,datetime('now')))-julianday(s.inicio))*24.0 *
-            COALESCE((SELECT cp.costo_hora FROM costos_persona cp
-                      WHERE cp.usuario_id=s.usuario_id AND cp.vigencia_desde <= date(s.inicio)
-                        AND (cp.vigencia_hasta IS NULL OR cp.vigencia_hasta >= date(s.inicio))
-                      ORDER BY cp.vigencia_desde DESC,cp.id DESC LIMIT 1),0)
+            {horas_expr.format(alias='s')} * {costo_hora_subquery.format(alias='s')}
         ),0) AS costo
         FROM sesiones_trabajo s
     """).fetchone()
-    por_cliente = conn.execute("""
+    por_cliente = conn.execute(f"""
         SELECT u.id, u.nombre, u.ruc,
-               COALESCE(SUM((julianday(COALESCE(s.fin, datetime('now'))) - julianday(s.inicio)) * 24.0),0) AS horas,
+               COALESCE(SUM({horas_expr.format(alias='s')}),0) AS horas,
                COALESCE((SELECT SUM(f.monto) FROM facturas_clientes f
                          WHERE f.cliente_id = u.id AND f.estado <> 'anulada'),0) AS facturacion,
                COALESCE((SELECT COUNT(*) FROM tareas t WHERE t.cliente_id = u.id),0) AS tareas
