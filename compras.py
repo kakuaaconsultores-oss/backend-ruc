@@ -47,17 +47,17 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'dias', dias_credito INTEGER NOT NULL DEFAULT 0, cuotas INTEGER NOT NULL DEFAULT 1, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(cliente_id,codigo))""")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
+                nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
+                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
+                UNIQUE(cliente_id,codigo))""")
             try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN tipo TEXT NOT NULL DEFAULT 'dias'")
             except Exception: pass
             try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN cuotas INTEGER NOT NULL DEFAULT 1")
             except Exception: pass
             try: conn.execute("ALTER TABLE formas_pago_compra ADD COLUMN cuenta_contable_id INTEGER")
             except Exception: pass
-            conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
-                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
-                nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
-                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
-                UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
                 razon_social TEXT NOT NULL, nombre_comercial TEXT DEFAULT '', documento TEXT DEFAULT '',
