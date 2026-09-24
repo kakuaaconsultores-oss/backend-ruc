@@ -45,8 +45,12 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS condiciones_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
-                nombre TEXT NOT NULL, dias_credito INTEGER NOT NULL DEFAULT 0, activo INTEGER NOT NULL DEFAULT 1,
+                nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'dias', dias_credito INTEGER NOT NULL DEFAULT 0, cuotas INTEGER NOT NULL DEFAULT 1, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
+            try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN tipo TEXT NOT NULL DEFAULT 'dias'")
+            except Exception: pass
+            try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN cuotas INTEGER NOT NULL DEFAULT 1")
+            except Exception: pass
             conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', activo INTEGER NOT NULL DEFAULT 1,
@@ -90,6 +94,15 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
                 cuenta_contable_id INTEGER DEFAULT NULL)""")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS cuotas_compras (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
+                numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
+                saldo REAL NOT NULL DEFAULT 0, estado TEXT NOT NULL DEFAULT 'pendiente',
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(comprobante_id,numero_cuota))""")
+            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN cuota_id INTEGER")
+            except Exception: pass
+            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN monto_aplicado REAL NOT NULL DEFAULT 0")
+            except Exception: pass
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
@@ -108,9 +121,14 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
-            for code,name,active in TIPOS_COMPROBANTE_DEFAULT:
-                try: conn.execute("INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) SELECT id,?,?,? FROM clientes ON CONFLICT(cliente_id,codigo) DO NOTHING", (code,name,active))
-                except Exception: pass
+            clientes = conn.execute("SELECT id FROM clientes").fetchall()
+            for cliente in clientes:
+                cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
+                existe = conn.execute("SELECT 1 FROM tipos_comprobante_compra WHERE cliente_id=? LIMIT 1", (cliente_id,)).fetchone()
+                if not existe:
+                    for code,name,active in TIPOS_COMPROBANTE_DEFAULT:
+                        try: conn.execute("INSERT INTO tipos_comprobante_compra(cliente_id,codigo,nombre,activo) VALUES(?,?,?,?)", (cliente_id,code,name,active))
+                        except Exception: pass
             conn.commit()
         finally: conn.close()
     init_compras()
@@ -128,8 +146,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             def rows(sql): return [dict(x) for x in conn.execute(sql,(cid,)).fetchall()]
             return jsonify({
                 "proveedores": rows("SELECT * FROM proveedores WHERE cliente_id=? AND estado='activo' ORDER BY razon_social"),
-                "tipos_comprobante": rows("SELECT * FROM tipos_comprobante_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre"),
-                "condiciones": rows("SELECT * FROM condiciones_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre"),
+                "tipos_comprobante": rows("SELECT * FROM tipos_comprobante_compra WHERE cliente_id=? ORDER BY nombre"),
+                "condiciones": rows("SELECT * FROM condiciones_compra WHERE cliente_id=? ORDER BY nombre"),
                 "formas_pago": rows("SELECT * FROM formas_pago_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre"),
                 "conceptos": rows("SELECT * FROM conceptos_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre")
             })
@@ -167,6 +185,13 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cid,err=_cliente_id(conn)
                 if err:return jsonify({"error":err}),401
                 if not d.get("codigo") or not d.get("nombre"): return jsonify({"error":"Código y nombre son obligatorios."}),400
+                if table == "condiciones_compra":
+                    tipo = (d.get("tipo") or "dias").strip().lower()
+                    dias = int(d.get("dias_credito") or 0); cuotas = int(d.get("cuotas") or 1)
+                    if tipo not in ("dias","cuotas"): return jsonify({"error":"Tipo de condición inválido."}),400
+                    if tipo == "dias" and dias < 0: return jsonify({"error":"Los días no pueden ser negativos."}),400
+                    if tipo == "cuotas" and cuotas < 1: return jsonify({"error":"La cantidad de cuotas debe ser al menos 1."}),400
+                    d["tipo"], d["dias_credito"], d["cuotas"] = tipo, (dias if tipo=="dias" else 0), (cuotas if tipo=="cuotas" else 1)
                 cols="cliente_id,"+",".join(fields); vals=[cid]+[d.get(x) for x in fields]
                 ph=",".join(["?"]*len(cols))
                 conn.execute(f"INSERT INTO {table}({cols}) VALUES({ph})",vals); conn.commit()
@@ -184,9 +209,59 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 return jsonify([dict(x) for x in conn.execute(f"SELECT * FROM {table} WHERE cliente_id=? ORDER BY nombre",(cid,)).fetchall()])
             finally: conn.close()
 
-    crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","dias_credito"])
+    crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo"])
     crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
+
+    for _table in ("tipos_comprobante_compra","condiciones_compra"):
+        @app.put(f"/api/compras/{_table}/<int:item_id>", endpoint="compras_edit_"+_table)
+        @staff_required
+        def editar_catalogo_compra(item_id, _table=_table):
+            d=parse_json(); conn=get_db()
+            try:
+                cid,err=_cliente_id(conn)
+                if err:return jsonify({"error":err}),401
+                row=conn.execute(f"SELECT * FROM {_table} WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+                if not row:return jsonify({"error":"Registro no encontrado."}),404
+                if not d.get("codigo") or not d.get("nombre"):return jsonify({"error":"Código y nombre son obligatorios."}),400
+                if _table=="tipos_comprobante_compra":
+                    conn.execute("UPDATE tipos_comprobante_compra SET codigo=?,nombre=?,activo=? WHERE id=? AND cliente_id=?",(d["codigo"].strip(),d["nombre"].strip(),1 if d.get("activo",1) else 0,item_id,cid))
+                else:
+                    tipo=(d.get("tipo") or "dias").strip().lower(); dias=int(d.get("dias_credito") or 0); cuotas=int(d.get("cuotas") or 1)
+                    if tipo not in ("dias","cuotas"):return jsonify({"error":"Tipo de condición inválido."}),400
+                    if tipo=="dias" and dias<0:return jsonify({"error":"Los días no pueden ser negativos."}),400
+                    if tipo=="cuotas" and cuotas<1:return jsonify({"error":"La cantidad de cuotas debe ser al menos 1."}),400
+                    conn.execute("UPDATE condiciones_compra SET codigo=?,nombre=?,tipo=?,dias_credito=?,cuotas=?,activo=? WHERE id=? AND cliente_id=?",(d["codigo"].strip(),d["nombre"].strip(),tipo,dias if tipo=="dias" else 0,cuotas if tipo=="cuotas" else 1,1 if d.get("activo",1) else 0,item_id,cid))
+                conn.commit();return jsonify({"ok":True})
+            except Exception as e:
+                conn.rollback();return jsonify({"error":str(e)}),400
+            finally:conn.close()
+
+        @app.delete(f"/api/compras/{_table}/<int:item_id>", endpoint="compras_delete_"+_table)
+        @staff_required
+        def eliminar_catalogo_compra(item_id, _table=_table):
+            conn=get_db()
+            try:
+                cid,err=_cliente_id(conn)
+                if err:return jsonify({"error":err}),401
+                row=conn.execute(f"SELECT id FROM {_table} WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+                if not row:return jsonify({"error":"Registro no encontrado."}),404
+                conn.execute(f"DELETE FROM {_table} WHERE id=? AND cliente_id=?",(item_id,cid));conn.commit()
+                return jsonify({"ok":True})
+            except Exception as e:
+                conn.rollback();return jsonify({"error":str(e)}),400
+            finally:conn.close()
+
+    @app.get("/api/compras/cuotas/<int:comprobante_id>")
+    @usuario_required
+    def listar_cuotas_compra(comprobante_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("SELECT * FROM cuotas_compras WHERE comprobante_id=? AND cliente_id=? ORDER BY numero_cuota",(comprobante_id,cid)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
 
     @app.post("/api/compras/proveedores/<int:proveedor_id>")
     @staff_required
@@ -229,6 +304,18 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             cols=["cliente_id","proveedor_id","tipo_comprobante_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
             vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
             cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
+            if d.get("condicion_id"):
+                condicion=conn.execute("SELECT * FROM condiciones_compra WHERE id=? AND cliente_id=? AND activo=1",(int(d["condicion_id"]),cid)).fetchone()
+                if not condicion:return jsonify({"error":"Condición de compra inválida."}),400
+                from datetime import date,timedelta
+                fecha_base=date.fromisoformat(str(d["fecha"])[:10])
+                tipo_cond=(condicion["tipo"] or "dias").lower()
+                cantidad=int(condicion["cuotas"] or 1) if tipo_cond=="cuotas" else 1
+                fechas=[fecha_base+timedelta(days=30*(i+1)) for i in range(cantidad)] if tipo_cond=="cuotas" else [fecha_base+timedelta(days=int(condicion["dias_credito"] or 0))]
+                total=float(d.get("total",0) or 0); base=round(total/cantidad,2)
+                for i,venc in enumerate(fechas,1):
+                    importe=base if i<cantidad else round(total-base*(cantidad-1),2)
+                    conn.execute("INSERT INTO cuotas_compras(cliente_id,comprobante_id,numero_cuota,fecha_vencimiento,importe,saldo,estado) VALUES(?,?,?,?,?,?,?)",(cid,cidc,i,venc.isoformat(),importe,importe,"pendiente"))
             for item in d.get("detalle",[]):
                 conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id) VALUES(?,?,?,?,?,?,?,?)""",
                     (cidc,item.get("concepto_id"),item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),float(item.get("iva_tasa",10) or 0),float(item.get("subtotal",0) or 0),item.get("cuenta_contable_id")))
