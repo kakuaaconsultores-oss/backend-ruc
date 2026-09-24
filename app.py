@@ -1,4 +1,5 @@
 import os
+import io
 import sqlite3
 import time
 import smtplib
@@ -12,6 +13,12 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from functools import wraps
 import bcrypt
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 try:
     import psycopg
@@ -559,12 +566,14 @@ def init_db_postgres():
             actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
             concepto_flujo_efectivo TEXT DEFAULT NULL,
             formulario_impuesto TEXT DEFAULT NULL,
+            inciso_formulario TEXT DEFAULT NULL,
             FOREIGN KEY (cuenta_padre_id) REFERENCES cuentas_contables(id)
         )""")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_cliente_codigo ON cuentas_contables(cliente_id, codigo)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cuentas_cliente ON cuentas_contables(cliente_id, codigo)")
         conn.execute("ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS concepto_flujo_efectivo TEXT DEFAULT NULL")
         conn.execute("ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS formulario_impuesto TEXT DEFAULT NULL")
+        conn.execute("ALTER TABLE cuentas_contables ADD COLUMN IF NOT EXISTS inciso_formulario TEXT DEFAULT NULL")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_global_codigo ON cuentas_contables(codigo) WHERE cliente_id IS NULL")
         conn.execute("""CREATE TABLE IF NOT EXISTS periodos_contables (
             id BIGSERIAL PRIMARY KEY,
@@ -838,6 +847,76 @@ CLIENTE_TIPOS = {"juridica", "fisica"}
 CLIENTE_OBLIGACIONES_VALIDAS = {"IVA", "IRP", "IRE", "IDU"}
 CLIENTE_IMPUESTOS_VALIDOS = {"IVA", "IRP-RSP", "IRP-RGC", "IRE SIMPLE", "IRE GENERAL"}
 CLIENTE_FORMULARIOS = {"IVA": "120", "IRP-RSP": "515", "IRP-RGC": "516", "IRE SIMPLE": "501", "IRE GENERAL": "500"}
+
+FLUJO_EFECTIVO_CLASIFICACIONES = {
+    "1.01": "VENTAS NETAS (COBRO NETO)",
+    "1.02": "PAGO A PROVEEDORES LOCALES (PAGO NETO)",
+    "1.03": "PAGO A PROVEEDORES DEL EXTERIOR (PAGO NETO)",
+    "1.04": "EFECTIVO PAGADO A EMPLEADOS",
+    "1.05": "EFECTIVO GENERADO (USADO) POR OTRAS ACTIVIDADES OPERATIVAS",
+    "1.06": "PAGO DE IMPUESTOS",
+    "2.01": "AUMENTO/DISMINUCIÓN NETO/A DE INVERSIONES TEMPORARIAS",
+    "2.02": "AUMENTO/DISMINUCIÓN NETO/A DE INVERSIONES A LARGO PLAZO",
+    "2.03": "AUMENTO/DISMINUCIÓN NETO/A DE PROPIEDAD, PLANTA Y EQUIPO",
+    "3.01": "APORTE DE CAPITAL",
+    "3.02": "AUMENTO/DISMINUCIÓN NETO/A DE PRÉSTAMOS",
+    "3.03": "DIVIDENDOS PAGADOS",
+    "3.04": "AUMENTO/DISMINUCIÓN NETO/A DE INTERESES",
+    "4": "EFECTO DE LAS GANANCIAS O PÉRDIDAS POR DIFERENCIAS DE TIPO DE CAMBIO",
+}
+
+FORMULARIO_RENTA_CASILLAS = {
+    "500": {
+        10: "Enajenación de bienes provenientes de la actividad comercial",
+        11: "Prestación de servicios no personales",
+        12: "Enajenación de bienes de producción industrial",
+        13: "Enajenación de productos agrícolas, frutícolas y hortícolas",
+        14: "Enajenación de bienes de producción animal o pecuaria",
+        15: "Enajenación de bienes de actividad forestal, minera, pesquera y extractiva",
+        16: "Intereses, comisiones, rendimientos y ganancias de capital",
+        17: "Operaciones con instrumentos financieros derivados",
+        18: "Otros ingresos gravados",
+        19: "Ingresos exonerados",
+        20: "Ingresos no gravados",
+        21: "Total de ingresos",
+        22: "Costo de bienes y servicios vendidos",
+        23: "Gastos de personal",
+        24: "Gastos de administración",
+        25: "Gastos de comercialización",
+        26: "Gastos financieros",
+        27: "Otros gastos deducibles",
+        28: "Total de egresos deducibles",
+        29: "Renta neta real",
+        30: "Renta neta fiscal",
+    },
+    "501": {
+        10: "TOTAL DE INGRESOS DEL EJERCICIO",
+        11: "TOTAL DE EGRESOS DEL EJERCICIO",
+        12: "RENTA NETA REAL",
+        13: "FACTURACIÓN BRUTA ANUAL DEL EJERCICIO",
+        14: "RENTA NETA PRESUNTA",
+        15: "SALDO A FAVOR DEL CONTRIBUYENTE DEL EJERCICIO ANTERIOR",
+        16: "RETENCIONES",
+        17: "PERCEPCIONES",
+        18: "ANTICIPOS INGRESADOS",
+        19: "SUBTOTAL A FAVOR DEL CONTRIBUYENTE",
+        20: "SALDO A FAVOR DEL CONTRIBUYENTE",
+        21: "BASE IMPONIBLE",
+        22: "IMPUESTO DETERMINADO",
+        23: "MULTA",
+        24: "SUBTOTAL A FAVOR DEL FISCO",
+        25: "SALDO A INGRESAR A FAVOR DEL FISCO",
+        26: "IMPUESTO LIQUIDADO EN EL PRESENTE EJERCICIO",
+        27: "RETENCIONES Y PERCEPCIONES COMPUTABLES",
+        28: "ANTICIPOS A INGRESAR PARA EL SIGUIENTE EJERCICIO",
+        29: "SALDO A FAVOR DEL CONTRIBUYENTE DEL EJERCICIO QUE SE LIQUIDA",
+        30: "CUOTAS DE ANTICIPOS A INGRESAR",
+        74: "IMPUESTO LIQUIDADO EN EL EJERCICIO ANTERIOR",
+        75: "IMPUESTO LIQUIDADO EN EL EJERCICIO ANTERIOR AL SEÑALADO EN EL INCISO B",
+        76: "PROMEDIO DEL IMPUESTO A LA RENTA LIQUIDADO",
+    }
+}
+
 
 def formulario_por_impuesto(tipo_impuesto):
     return CLIENTE_FORMULARIOS.get(str(tipo_impuesto or "").strip().upper())
@@ -2499,7 +2578,8 @@ def detalle_tiempo_cliente(cliente_id):
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_cuentas_global_codigo ON cuentas_contables(codigo) WHERE cliente_id IS NULL")
     for col, definition in [
         ("concepto_flujo_efectivo", "TEXT DEFAULT NULL"),
-        ("formulario_impuesto", "TEXT DEFAULT NULL")
+        ("formulario_impuesto", "TEXT DEFAULT NULL"),
+        ("inciso_formulario", "TEXT DEFAULT NULL")
     ]:
         try:
             conn.execute(f"ALTER TABLE cuentas_contables ADD COLUMN {col} {definition}")
@@ -2626,6 +2706,7 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     naturaleza = str(data.get("naturaleza", "")).strip().lower()
     concepto_flujo = str(data.get("concepto_flujo_efectivo", "")).strip().lower()
     formulario_impuesto = str(data.get("formulario_impuesto", "")).strip().upper()
+    inciso_formulario = str(data.get("inciso_formulario", "")).strip()
     try:
         nivel = int(data.get("nivel", 1))
     except (TypeError, ValueError):
@@ -2638,7 +2719,7 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         return "La naturaleza debe ser deudora o acreedora."
     if nivel < 1:
         return "El nivel debe ser mayor o igual a 1."
-    if concepto_flujo not in {"operacion", "inversion", "financiacion", "no_aplica"}:
+    if concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
         return "El concepto de Estado de Flujo de Efectivo no es válido."
 
     formulario_esperado = "NO_APLICA"
@@ -2652,6 +2733,20 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         formulario_esperado = formulario_por_impuesto(tipo_impuesto_cliente) or "NO_APLICA"
     if formulario_impuesto != formulario_esperado:
         return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
+    if formulario_esperado in {"500", "501"}:
+        if not bool(data.get("imputable", True)) and inciso_formulario:
+            return "El inciso/casilla del Formulario 500/501 solo puede asignarse a cuentas imputables."
+        if bool(data.get("imputable", True)) and inciso_formulario:
+            try:
+                inciso = int(inciso_formulario)
+            except ValueError:
+                return "El inciso/casilla del Formulario 500/501 debe ser numérico."
+            if inciso <= 0:
+                return "El inciso/casilla del Formulario 500/501 debe ser mayor que cero."
+            if inciso not in FORMULARIO_RENTA_CASILLAS[formulario_esperado]:
+                return f"La casilla {inciso} no está definida para el Formulario {formulario_esperado}."
+    elif inciso_formulario:
+        return "El inciso/casilla de renta solo corresponde a los Formularios 500 y 501."
 
     scope = "cliente_id IS NULL" if cliente_id is None else "cliente_id = ?"
     scope_params = () if cliente_id is None else (cliente_id,)
@@ -2728,12 +2823,12 @@ def crear_cuenta_contable():
     nivel=int(data.get("nivel",1))
     try:
         conn.execute("""INSERT INTO cuentas_contables
-            (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa,concepto_flujo_efectivo,formulario_impuesto)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa,concepto_flujo_efectivo,formulario_impuesto,inciso_formulario)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (cliente_id,str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
              str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),nivel,padre,
              1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,
-             str(data["concepto_flujo_efectivo"]).strip().lower(),str(data["formulario_impuesto"]).strip().upper()))
+             str(data["concepto_flujo_efectivo"]).strip(),str(data["formulario_impuesto"]).strip().upper(),(str(data.get("inciso_formulario","")).strip() if data.get("imputable",True) else None)))
         fila=(conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id IS NULL AND codigo = ?",(str(data["codigo"]).strip(),)).fetchone()
               if cliente_id is None else
               conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,str(data["codigo"]).strip())).fetchone())
@@ -2763,11 +2858,11 @@ def actualizar_cuenta_contable(cuenta_id):
     values=(str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
             str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,
-            str(data["concepto_flujo_efectivo"]).strip().lower(),str(data["formulario_impuesto"]).strip().upper(),cuenta_id)
+            str(data["concepto_flujo_efectivo"]).strip(),str(data["formulario_impuesto"]).strip().upper(),(str(data.get("inciso_formulario","")).strip() if data.get("imputable",True) else None),cuenta_id)
     try:
         if cliente_id is None:
             conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
-                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,actualizado_en=CURRENT_TIMESTAMP
+                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,inciso_formulario=?,actualizado_en=CURRENT_TIMESTAMP
                             WHERE id=? AND cliente_id IS NULL""",values)
             fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id IS NULL",(cuenta_id,)).fetchone()
         else:
@@ -2904,6 +2999,122 @@ def anular_asiento_contable(asiento_id):
     conn.execute("UPDATE asientos_contables SET estado='anulado',actualizado_en=CURRENT_TIMESTAMP WHERE id=?",(asiento_id,))
     conn.commit(); conn.close()
     return jsonify({"ok":True})
+
+# ==================== REPORTES CONTABLES ====================
+
+def _renta_casillas(conn, cliente_id, formulario, desde, hasta):
+    filas = conn.execute("""
+        SELECT c.inciso_formulario AS inciso,
+               COALESCE(SUM(d.debe - d.haber), 0) AS importe
+        FROM detalle_asientos d
+        JOIN asientos_contables a ON a.id = d.asiento_id
+        JOIN cuentas_contables c ON c.id = d.cuenta_id
+        WHERE a.cliente_id = ?
+          AND a.estado = 'contabilizado'
+          AND a.fecha >= ?
+          AND a.fecha <= ?
+          AND c.cliente_id = ?
+          AND c.imputable = 1
+          AND c.formulario_impuesto = ?
+          AND c.inciso_formulario IS NOT NULL
+          AND TRIM(c.inciso_formulario) <> ''
+        GROUP BY c.inciso_formulario
+    """, (cliente_id, desde, hasta, cliente_id, formulario)).fetchall()
+    return {int(r["inciso"]): float(r["importe"] or 0) for r in filas if str(r["inciso"]).isdigit()}
+
+def _construir_formulario_renta(conn, cliente_id, desde, hasta):
+    cliente = conn.execute("SELECT * FROM clientes WHERE id = ? AND estado = 'activo'", (cliente_id,)).fetchone()
+    if not cliente:
+        raise ValueError("Cliente no encontrado.")
+    formulario = formulario_por_impuesto(str(cliente["tipo_impuesto"] or "").upper())
+    if formulario not in {"500", "501"}:
+        raise ValueError("El cliente seleccionado no utiliza el Formulario 500 o 501.")
+    valores = _renta_casillas(conn, cliente_id, formulario, desde, hasta)
+    definiciones = FORMULARIO_RENTA_CASILLAS[formulario]
+    if formulario == "501":
+        valores[12] = max(0, valores.get(10, 0) - valores.get(11, 0))
+        valores[14] = valores.get(13, 0) * 0.30
+        valores[21] = min(valores.get(12, 0), valores.get(14, 0))
+        valores[22] = valores[21] * 0.10
+        valores[19] = sum(valores.get(i, 0) for i in (15, 16, 17, 18))
+        valores[24] = valores.get(22, 0) + valores.get(23, 0)
+        valores[20] = max(0, valores[19] - valores[24])
+        valores[25] = max(0, valores[24] - valores[19])
+        valores[26] = valores.get(22, 0)
+        valores[27] = valores.get(16, 0) + valores.get(17, 0)
+        valores[28] = max(0, valores.get(76, valores.get(26, 0)) - valores.get(27, 0))
+        valores[29] = min(valores.get(20, 0), valores.get(28, 0))
+        valores[30] = max(0, valores.get(28, 0) - valores.get(29, 0)) * 0.25
+    return {"cliente": dict(cliente), "formulario": formulario, "version": "3" if formulario == "500" else "2",
+            "desde": desde, "hasta": hasta,
+            "casillas": [{"numero": n, "descripcion": d, "importe": round(float(valores.get(n, 0)), 2)} for n, d in definiciones.items()],
+            "nota": "Preliquidación generada desde la contabilidad de Kakuaa ERP. Debe ser revisada antes de su presentación en Marangatu."}
+
+@app.route("/api/contabilidad/reportes/formulario-renta", methods=["GET"])
+@admin_required
+def reporte_formulario_renta():
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
+    desde = str(request.args.get("desde", "")).strip() or datetime.utcnow().strftime("%Y") + "-01-01"
+    hasta = str(request.args.get("hasta", "")).strip() or datetime.utcnow().strftime("%Y") + "-12-31"
+    try:
+        datetime.strptime(desde, "%Y-%m-%d"); datetime.strptime(hasta, "%Y-%m-%d")
+    except ValueError: return jsonify({"error": "Las fechas deben tener formato AAAA-MM-DD."}), 400
+    if desde > hasta: return jsonify({"error": "La fecha desde no puede ser posterior a la fecha hasta."}), 400
+    conn=get_db()
+    try: return jsonify(_construir_formulario_renta(conn, cliente_id, desde, hasta))
+    except ValueError as e: return jsonify({"error": str(e)}), 400
+    finally: conn.close()
+
+@app.route("/api/contabilidad/reportes/formulario-renta/<formato>", methods=["GET"])
+@admin_required
+def descargar_formulario_renta(formato):
+    cliente_id, error_ctx = obtener_cliente_contable()
+    if error_ctx: return error_ctx
+    formato = str(formato).strip().lower()
+    if formato not in {"xlsx", "pdf"}: return jsonify({"error": "Formato no válido. Usá xlsx o pdf."}), 400
+    desde = str(request.args.get("desde", "")).strip() or datetime.utcnow().strftime("%Y") + "-01-01"
+    hasta = str(request.args.get("hasta", "")).strip() or datetime.utcnow().strftime("%Y") + "-12-31"
+    try:
+        datetime.strptime(desde, "%Y-%m-%d"); datetime.strptime(hasta, "%Y-%m-%d")
+    except ValueError: return jsonify({"error": "Las fechas deben tener formato AAAA-MM-DD."}), 400
+    conn=get_db()
+    try: reporte=_construir_formulario_renta(conn, cliente_id, desde, hasta)
+    except ValueError as e: conn.close(); return jsonify({"error": str(e)}), 400
+    finally:
+        try: conn.close()
+        except Exception: pass
+    razon=str(reporte["cliente"]["razon_social"]).replace("/", "-")
+    nombre=f"Formulario_{reporte['formulario']}_{razon}_{desde}_{hasta}"
+    if formato == "xlsx":
+        wb=Workbook(); ws=wb.active; ws.title=f"Form {reporte['formulario']}"
+        ws["A1"]=f"FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}"
+        ws.merge_cells("A1:C1"); ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
+        ws.append(["RUC",reporte["cliente"]["ruc"],"DV",reporte["cliente"].get("dv","")])
+        ws.append(["Razón Social",reporte["cliente"]["razon_social"]]); ws.append(["Período",f"{desde} al {hasta}"]); ws.append([])
+        ws.append(["INC./CASILLA","DESCRIPCIÓN","IMPORTE"])
+        thin=Side(style="thin",color="B7B7B7")
+        for cell in ws[6]: cell.font=Font(bold=True); cell.border=Border(bottom=thin)
+        for item in reporte["casillas"]: ws.append([item["numero"],item["descripcion"],item["importe"]])
+        for row in ws.iter_rows(min_row=7,min_col=3,max_col=3): row[0].number_format='#,##0'
+        ws.column_dimensions["A"].width=16; ws.column_dimensions["B"].width=72; ws.column_dimensions["C"].width=18; ws.freeze_panes="A7"
+        ws.cell(ws.max_row+2,1,reporte["nota"]); ws.merge_cells(start_row=ws.max_row+2,start_column=1,end_row=ws.max_row+2,end_column=3)
+        output=io.BytesIO(); wb.save(output); output.seek(0)
+        from flask import send_file
+        return send_file(output,as_attachment=True,download_name=nombre+".xlsx",mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    styles=getSampleStyleSheet(); output=io.BytesIO()
+    doc=SimpleDocTemplate(output,pagesize=A4,rightMargin=28,leftMargin=28,topMargin=28,bottomMargin=28)
+    story=[Paragraph(f"<b>FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}</b>",styles["Title"]),
+           Paragraph(f"RUC: {html.escape(str(reporte['cliente']['ruc']))} &nbsp;&nbsp; DV: {html.escape(str(reporte['cliente'].get('dv','')))}",styles["Normal"]),
+           Paragraph(f"Razón Social: {html.escape(str(reporte['cliente']['razon_social']))}",styles["Normal"]),
+           Paragraph(f"Período: {desde} al {hasta}",styles["Normal"]),Spacer(1,10)]
+    data=[["INC./CASILLA","DESCRIPCIÓN","IMPORTE"]]+[[str(x["numero"]),x["descripcion"],f"{x['importe']:,.0f}"] for x in reporte["casillas"]]
+    table=Table(data,colWidths=[65,370,90],repeatRows=1)
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1a2a5e")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.grey),("ALIGN",(2,1),(2,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8)]))
+    story += [table,Spacer(1,10),Paragraph(html.escape(reporte["nota"]),styles["Normal"])]
+    doc.build(story); output.seek(0)
+    from flask import send_file
+    return send_file(output,as_attachment=True,download_name=nombre+".pdf",mimetype="application/pdf")
 
 # Consulta pública de RUC mediante la API de integración de TuRuc.
 # El backend actúa como proxy para que el frontend de Kakuaa no dependa
