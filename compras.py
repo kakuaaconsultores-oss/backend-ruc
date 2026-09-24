@@ -41,12 +41,12 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             conn.execute(f"""CREATE TABLE IF NOT EXISTS tipos_comprobante_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
-                nombre TEXT NOT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                nombre TEXT NOT NULL, activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
                 UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS condiciones_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'dias', dias_credito INTEGER NOT NULL DEFAULT 0, cuotas INTEGER NOT NULL DEFAULT 1, activo INTEGER NOT NULL DEFAULT 1,
-                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
+                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(cliente_id,codigo))""")
             try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN tipo TEXT NOT NULL DEFAULT 'dias'")
             except Exception: pass
             try: conn.execute("ALTER TABLE condiciones_compra ADD COLUMN cuotas INTEGER NOT NULL DEFAULT 1")
@@ -56,7 +56,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
-                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
                 UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
@@ -64,18 +64,18 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 correo TEXT DEFAULT '', telefono TEXT DEFAULT '', direccion TEXT DEFAULT '',
                 condicion_compra_id INTEGER DEFAULT NULL, forma_pago_id INTEGER DEFAULT NULL,
                 cuenta_contable_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'activo',
-                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedores_cliente ON proveedores(cliente_id, estado, razon_social)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
                 cuenta_contable_id INTEGER DEFAULT NULL, tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
-                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
+                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, fecha_entrega TEXT DEFAULT NULL, condicion_id INTEGER DEFAULT NULL,
                 forma_pago_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
-                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
@@ -88,8 +88,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 gravado_10 REAL DEFAULT 0, gravado_5 REAL DEFAULT 0, exento REAL DEFAULT 0,
                 iva_10 REAL DEFAULT 0, iva_5 REAL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
                 orden_compra_id INTEGER DEFAULT NULL, origen TEXT DEFAULT 'MANUAL',
-                observacion TEXT DEFAULT '', creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
-                actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                observacion TEXT DEFAULT '', creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT),
+                actualizado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
@@ -101,17 +101,17 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
                 saldo REAL NOT NULL DEFAULT 0, estado TEXT NOT NULL DEFAULT 'pendiente',
-                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(comprobante_id,numero_cuota))""")
+                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT), UNIQUE(comprobante_id,numero_cuota))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
                 motivo TEXT DEFAULT '', estado TEXT NOT NULL DEFAULT 'registrado', creado_por INTEGER,
-                creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
                 forma_pago_id INTEGER, total REAL NOT NULL DEFAULT 0, observacion TEXT DEFAULT '',
-                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
                 concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0)""")
@@ -123,7 +123,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
-                creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                creado_por INTEGER, creado_en TEXT DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT))""")
             clientes = conn.execute("SELECT id FROM clientes").fetchall()
             for cliente in clientes:
                 cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
@@ -307,7 +307,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             campos=["ruc","razon_social","nombre_comercial","documento","correo","telefono","direccion","condicion_compra_id","forma_pago_id","cuenta_contable_id","estado"]
             sets=", ".join(f"{x}=?" for x in campos)
             vals=[d.get(x) for x in campos]+[cid,proveedor_id]
-            conn.execute(f"UPDATE proveedores SET {sets}, actualizado_en=CURRENT_TIMESTAMP WHERE cliente_id=? AND id=?",vals); conn.commit()
+            conn.execute(f"UPDATE proveedores SET {sets}, actualizado_en=CAST(CURRENT_TIMESTAMP AS TEXT) WHERE cliente_id=? AND id=?",vals); conn.commit()
             return jsonify({"ok":True})
         finally: conn.close()
 
@@ -367,7 +367,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            conn.execute("UPDATE comprobantes_compra SET estado=?, actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",(estado,comp_id,cid)); conn.commit()
+            conn.execute("UPDATE comprobantes_compra SET estado=?, actualizado_en=CAST(CURRENT_TIMESTAMP AS TEXT) WHERE id=? AND cliente_id=?",(estado,comp_id,cid)); conn.commit()
             return jsonify({"ok":True})
         finally: conn.close()
 
