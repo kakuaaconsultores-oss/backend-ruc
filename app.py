@@ -2689,21 +2689,28 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
 @app.route("/api/contabilidad/cuentas", methods=["GET"])
 @admin_required
 def listar_cuentas_contables():
-    cliente_id, error_ctx = obtener_cliente_contable()
+    cliente_id, error_ctx = obtener_contexto_cuenta()
     if error_ctx: return error_ctx
     conn=get_db()
-    filas=conn.execute("""SELECT c.*, p.codigo AS padre_codigo, p.nombre AS padre_nombre
-                          FROM cuentas_contables c
-                          LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id AND p.cliente_id=c.cliente_id
-                          WHERE c.cliente_id = ?
-                          ORDER BY c.codigo""",(cliente_id,)).fetchall()
+    if cliente_id is None:
+        filas=conn.execute("""SELECT c.*, p.codigo AS padre_codigo, p.nombre AS padre_nombre
+                              FROM cuentas_contables c
+                              LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id AND p.cliente_id IS NULL
+                              WHERE c.cliente_id IS NULL
+                              ORDER BY c.codigo""").fetchall()
+    else:
+        filas=conn.execute("""SELECT c.*, p.codigo AS padre_codigo, p.nombre AS padre_nombre
+                              FROM cuentas_contables c
+                              LEFT JOIN cuentas_contables p ON p.id=c.cuenta_padre_id AND p.cliente_id=c.cliente_id
+                              WHERE c.cliente_id = ?
+                              ORDER BY c.codigo""",(cliente_id,)).fetchall()
     conn.close()
     return jsonify([dict(f) for f in filas])
 
 @app.route("/api/contabilidad/cuentas", methods=["POST"])
 @admin_required
 def crear_cuenta_contable():
-    cliente_id, error_ctx = obtener_cliente_contable()
+    cliente_id, error_ctx = obtener_contexto_cuenta()
     if error_ctx: return error_ctx
     data=request.get_json(silent=True) or {}
     conn=get_db()
@@ -2715,59 +2722,79 @@ def crear_cuenta_contable():
     nivel=int(data.get("nivel",1))
     try:
         conn.execute("""INSERT INTO cuentas_contables
-            (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (cliente_id,codigo,nombre,descripcion,tipo,naturaleza,nivel,cuenta_padre_id,imputable,activa,concepto_flujo_efectivo,formulario_impuesto)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (cliente_id,str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
              str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),nivel,padre,
-             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0))
-        fila=conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,str(data["codigo"]).strip())).fetchone()
+             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,
+             str(data["concepto_flujo_efectivo"]).strip().lower(),str(data["formulario_impuesto"]).strip().upper()))
+        fila=(conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id IS NULL AND codigo = ?",(str(data["codigo"]).strip(),)).fetchone()
+              if cliente_id is None else
+              conn.execute("SELECT * FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,str(data["codigo"]).strip())).fetchone())
         conn.commit(); conn.close()
         return jsonify({"ok":True,"cuenta":dict(fila)}),201
     except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close()
-        return jsonify({"error":"Ya existe una cuenta con ese código para este cliente."}),409
+        return jsonify({"error":"Ya existe una cuenta con ese código en este contexto."}),409
 
 @app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["PUT"])
 @admin_required
 def actualizar_cuenta_contable(cuenta_id):
-    cliente_id, error_ctx = obtener_cliente_contable()
+    cliente_id, error_ctx = obtener_contexto_cuenta()
     if error_ctx: return error_ctx
     data=request.get_json(silent=True) or {}
     conn=get_db()
-    if not conn.execute("SELECT id FROM cuentas_contables WHERE id = ? AND cliente_id = ?",(cuenta_id,cliente_id)).fetchone():
-        conn.close(); return jsonify({"error":"Cuenta no encontrada para el cliente seleccionado."}),404
+    existe=(conn.execute("SELECT id FROM cuentas_contables WHERE id = ? AND cliente_id IS NULL",(cuenta_id,)).fetchone()
+            if cliente_id is None else
+            conn.execute("SELECT id FROM cuentas_contables WHERE id = ? AND cliente_id = ?",(cuenta_id,cliente_id)).fetchone())
+    if not existe:
+        conn.close(); return jsonify({"error":"Cuenta no encontrada en el contexto seleccionado."}),404
     error=_validar_cuenta_contable(data,conn,cliente_id,cuenta_id)
     if error:
         conn.close(); return jsonify({"error":error}),400
     padre=data.get("cuenta_padre_id")
     padre=int(padre) if padre not in (None,"","null") else None
+    values=(str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
+            str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
+            1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,
+            str(data["concepto_flujo_efectivo"]).strip().lower(),str(data["formulario_impuesto"]).strip().upper(),cuenta_id)
     try:
-        conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
-                        nivel=?,cuenta_padre_id=?,imputable=?,activa=?,actualizado_en=CURRENT_TIMESTAMP
-                        WHERE id=? AND cliente_id=?""",
-            (str(data["codigo"]).strip(),str(data["nombre"]).strip(),str(data.get("descripcion","")).strip(),
-             str(data["tipo"]).lower(),str(data["naturaleza"]).lower(),int(data.get("nivel",1)),padre,
-             1 if data.get("imputable",True) else 0,1 if data.get("activa",True) else 0,cuenta_id,cliente_id))
-        fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id)).fetchone()
+        if cliente_id is None:
+            conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
+                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,actualizado_en=CURRENT_TIMESTAMP
+                            WHERE id=? AND cliente_id IS NULL""",values)
+            fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id IS NULL",(cuenta_id,)).fetchone()
+        else:
+            conn.execute("""UPDATE cuentas_contables SET codigo=?,nombre=?,descripcion=?,tipo=?,naturaleza=?,
+                            nivel=?,cuenta_padre_id=?,imputable=?,activa=?,concepto_flujo_efectivo=?,formulario_impuesto=?,actualizado_en=CURRENT_TIMESTAMP
+                            WHERE id=? AND cliente_id=?""",values+(cliente_id,))
+            fila=conn.execute("SELECT * FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id)).fetchone()
         conn.commit(); conn.close()
         return jsonify({"ok":True,"cuenta":dict(fila)})
     except DB_INTEGRITY_ERROR:
         conn.rollback(); conn.close()
-        return jsonify({"error":"Ya existe otra cuenta para este cliente con ese código."}),409
+        return jsonify({"error":"Ya existe otra cuenta para ese código en este contexto."}),409
 
 @app.route("/api/contabilidad/cuentas/<int:cuenta_id>", methods=["DELETE"])
 @admin_required
 def eliminar_cuenta_contable(cuenta_id):
-    cliente_id, error_ctx = obtener_cliente_contable()
+    cliente_id, error_ctx = obtener_contexto_cuenta()
     if error_ctx: return error_ctx
     conn=get_db()
-    movimientos=conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
-                                JOIN asientos_contables a ON a.id=d.asiento_id
-                                WHERE d.cuenta_id=? AND a.cliente_id=?""",(cuenta_id,cliente_id)).fetchone()["n"]
-    hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id=? AND cuenta_padre_id=?",(cliente_id,cuenta_id)).fetchone()["n"]
+    if cliente_id is None:
+        movimientos=conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
+                                    JOIN asientos_contables a ON a.id=d.asiento_id
+                                    WHERE d.cuenta_id=? AND a.cliente_id IS NULL""",(cuenta_id,)).fetchone()["n"]
+        hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id IS NULL AND cuenta_padre_id=?",(cuenta_id,)).fetchone()["n"]
+        cur=conn.execute("DELETE FROM cuentas_contables WHERE id=? AND cliente_id IS NULL",(cuenta_id,))
+    else:
+        movimientos=conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
+                                    JOIN asientos_contables a ON a.id=d.asiento_id
+                                    WHERE d.cuenta_id=? AND a.cliente_id=?""",(cuenta_id,cliente_id)).fetchone()["n"]
+        hijos=conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id=? AND cuenta_padre_id=?",(cliente_id,cuenta_id)).fetchone()["n"]
+        cur=conn.execute("DELETE FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id))
     if movimientos or hijos:
-        conn.close(); return jsonify({"error":"La cuenta tiene movimientos o subcuentas y no puede eliminarse. Desactivala en su lugar."}),409
-    cur=conn.execute("DELETE FROM cuentas_contables WHERE id=? AND cliente_id=?",(cuenta_id,cliente_id))
+        conn.rollback(); conn.close(); return jsonify({"error":"La cuenta tiene movimientos o subcuentas y no puede eliminarse. Desactivala en su lugar."}),409
     conn.commit(); conn.close()
     if cur.rowcount == 0: return jsonify({"error":"Cuenta no encontrada"}),404
     return jsonify({"ok":True})
