@@ -239,6 +239,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 return jsonify([dict(x) for x in conn.execute(f"SELECT * FROM {table} WHERE cliente_id=? ORDER BY nombre",(cid,)).fetchall()])
             finally: conn.close()
 
+    crud_catalogo("/api/compras/tipos-comprobante","tipos_comprobante_compra",["codigo","nombre","activo"])
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
     crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
