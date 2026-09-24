@@ -991,10 +991,14 @@ def actualizar_cliente(cliente_id):
     tipo = str(data.get("tipo_persona", "juridica")).strip().lower()
     if tipo not in CLIENTE_TIPOS:
         return jsonify({"error": "El tipo de persona no es válido."}), 400
+    tipo_impuesto = str(data.get("tipo_impuesto", "")).strip().upper()
+    if tipo_impuesto not in CLIENTE_IMPUESTOS_VALIDOS:
+        return jsonify({"error": "Seleccioná un tipo de impuesto válido."}), 400
     obligaciones = data.get("obligaciones") or []
     if not isinstance(obligaciones, list):
-        return jsonify({"error": "Las obligaciones deben enviarse como una lista."}), 400
-    obligaciones = sorted(set(str(x).strip().upper() for x in obligaciones if str(x).strip()))
+        obligaciones = []
+    obligacion_principal = "IVA" if tipo_impuesto == "IVA" else "IRP" if tipo_impuesto.startswith("IRP-") else "IRE"
+    obligaciones = sorted(set([str(x).strip().upper() for x in obligaciones if str(x).strip()] + [obligacion_principal]))
     if any(x not in CLIENTE_OBLIGACIONES_VALIDAS for x in obligaciones):
         return jsonify({"error": "Hay una obligación no válida."}), 400
 
@@ -1006,10 +1010,10 @@ def actualizar_cliente(cliente_id):
         conn.execute(
             """UPDATE clientes SET ruc = ?, dv = ?, razon_social = ?, nombre_comercial = ?,
                tipo_persona = ?, documento = ?, correo = ?, telefono = ?, direccion = ?,
-               actualizado_en = CURRENT_TIMESTAMP WHERE id = ?""",
+               tipo_impuesto = ?, actualizado_en = CURRENT_TIMESTAMP WHERE id = ?""",
             (ruc, str(data.get("dv", "")).strip(), razon, str(data.get("nombre_comercial", "")).strip(),
              tipo, str(data.get("documento", "")).strip(), str(data.get("correo", "")).strip(),
-             str(data.get("telefono", "")).strip(), str(data.get("direccion", "")).strip(), cliente_id)
+             str(data.get("telefono", "")).strip(), str(data.get("direccion", "")).strip(), tipo_impuesto, cliente_id)
         )
         conn.execute("DELETE FROM cliente_obligaciones WHERE cliente_id = ?", (cliente_id,))
         for codigo in obligaciones:
