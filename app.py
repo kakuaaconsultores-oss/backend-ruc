@@ -433,10 +433,15 @@ def init_db():
         creado_por INTEGER,
         creado_en TEXT DEFAULT (datetime('now')),
         actualizado_en TEXT DEFAULT (datetime('now')),
+        tipo_impuesto TEXT DEFAULT NULL,
         FOREIGN KEY (creado_por) REFERENCES usuarios(id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
+    try:
+        conn.execute("ALTER TABLE clientes ADD COLUMN tipo_impuesto TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cliente_id INTEGER NOT NULL,
@@ -513,10 +518,12 @@ def init_db_postgres():
             estado TEXT NOT NULL DEFAULT 'activo',
             creado_por BIGINT REFERENCES usuarios(id),
             creado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
-            actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text)
+            actualizado_en TEXT DEFAULT (CURRENT_TIMESTAMP::text),
+            tipo_impuesto TEXT DEFAULT NULL
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_estado ON clientes(estado)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clientes_razon_social ON clientes(razon_social)")
+        conn.execute("ALTER TABLE clientes ADD COLUMN IF NOT EXISTS tipo_impuesto TEXT DEFAULT NULL")
         conn.execute("""CREATE TABLE IF NOT EXISTS cliente_obligaciones (
             id BIGSERIAL PRIMARY KEY,
             cliente_id BIGINT NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
@@ -824,6 +831,11 @@ def rate_limit_response():
 
 CLIENTE_TIPOS = {"juridica", "fisica"}
 CLIENTE_OBLIGACIONES_VALIDAS = {"IVA", "IRP", "IRE", "IDU"}
+CLIENTE_IMPUESTOS_VALIDOS = {"IVA", "IRP-RSP", "IRP-RGC", "IRE SIMPLE", "IRE GENERAL"}
+CLIENTE_FORMULARIOS = {"IVA": "120", "IRP-RSP": "515", "IRP-RGC": "516", "IRE SIMPLE": "501", "IRE GENERAL": "500"}
+
+def formulario_por_impuesto(tipo_impuesto):
+    return CLIENTE_FORMULARIOS.get(str(tipo_impuesto or "").strip().upper())
 
 def _cliente_obligaciones(conn, cliente_id):
     filas = conn.execute(
@@ -835,11 +847,11 @@ def _cliente_obligaciones(conn, cliente_id):
 def _cliente_dict(conn, fila):
     obligaciones = _cliente_obligaciones(conn, fila["id"])
     tipo = str(fila["tipo_persona"] or "juridica").lower()
-    perfil = "PERSONA_JURIDICA" if tipo == "juridica" else (
-        "PERSONA_FISICA_IVA_IRP" if "IVA" in obligaciones and "IRP" in obligaciones
-        else "PERSONA_FISICA_IRP" if "IRP" in obligaciones
-        else "PERSONA_FISICA"
-    )
+    tipo_impuesto = str(fila["tipo_impuesto"] or "").strip().upper()
+    perfil = ("PERSONA_JURIDICA" if tipo == "juridica" else
+              "PERSONA_FISICA_IVA_IRP" if tipo_impuesto == "IVA" else
+              "PERSONA_FISICA_IRP" if tipo_impuesto in {"IRP-RSP", "IRP-RGC"} else
+              "PERSONA_FISICA")
     return {
         "id": fila["id"],
         "ruc": fila["ruc"],
@@ -853,6 +865,8 @@ def _cliente_dict(conn, fila):
         "direccion": fila["direccion"] or "",
         "estado": fila["estado"],
         "obligaciones": obligaciones,
+        "tipo_impuesto": tipo_impuesto,
+        "formulario_impuesto": formulario_por_impuesto(tipo_impuesto),
         "perfil": perfil,
         "creado_en": fila["creado_en"],
         "actualizado_en": fila["actualizado_en"],
