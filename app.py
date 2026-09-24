@@ -3038,7 +3038,6 @@ def descargar_plantilla_cuentas():
         ["FORMULARIO_IMPUESTO","En cliente IRE se valida automáticamente contra 500/501. En Kakuaa general usar NO_APLICA."],
         ["INCISO_FORMULARIO","Solo para cuentas imputables IRE 500/501; debe corresponder a una casilla válida."],
     ]
-    instructions.forEach ? null : null;
     for(const row of instructions) info.append(row);
     for(const cell of info[1]) cell.font=Font(bold=True)
     info.column_dimensions["A"].width=28; info.column_dimensions["B"].width=100;
