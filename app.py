@@ -2593,11 +2593,38 @@ def obtener_cliente_contable():
 
 # ==================== API CONTABILIDAD ====================
 
+def obtener_contexto_cuenta():
+    """Sin cliente activo: catálogo maestro de Kakuaa Consultores.
+    Con cliente activo: catálogo exclusivo del cliente seleccionado.
+    """
+    usuario = obtener_usuario_por_token()
+    if not usuario:
+        return None, (jsonify({"error": "No autorizado"}), 401)
+    raw = request.headers.get("X-Cliente-ID", "").strip()
+    if not raw:
+        return None, None
+    try:
+        cliente_id = int(raw)
+    except ValueError:
+        return None, (jsonify({"error": "El cliente seleccionado no es válido."}), 400)
+    conn = get_db()
+    fila = conn.execute("SELECT id FROM clientes WHERE id = ? AND estado = 'activo'", (cliente_id,)).fetchone()
+    if not fila:
+        conn.close()
+        return None, (jsonify({"error": "El cliente seleccionado no existe o está inactivo."}), 404)
+    if not _puede_acceder_cliente(conn, usuario, cliente_id):
+        conn.close()
+        return None, (jsonify({"error": "No tenés acceso a este cliente."}), 403)
+    conn.close()
+    return cliente_id, None
+
 def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     codigo = str(data.get("codigo", "")).strip()
     nombre = str(data.get("nombre", "")).strip()
     tipo = str(data.get("tipo", "")).strip().lower()
     naturaleza = str(data.get("naturaleza", "")).strip().lower()
+    concepto_flujo = str(data.get("concepto_flujo_efectivo", "")).strip().lower()
+    formulario_impuesto = str(data.get("formulario_impuesto", "")).strip().upper()
     try:
         nivel = int(data.get("nivel", 1))
     except (TypeError, ValueError):
@@ -2610,30 +2637,49 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         return "La naturaleza debe ser deudora o acreedora."
     if nivel < 1:
         return "El nivel debe ser mayor o igual a 1."
+    if concepto_flujo not in {"operacion", "inversion", "financiacion", "no_aplica"}:
+        return "El concepto de Estado de Flujo de Efectivo no es válido."
+
+    formulario_esperado = "NO_APLICA"
+    if cliente_id is not None:
+        fila_cliente = conn.execute("SELECT tipo_impuesto FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+        if not fila_cliente:
+            return "El cliente seleccionado no existe."
+        formulario_esperado = formulario_por_impuesto(fila_cliente["tipo_impuesto"]) or "NO_APLICA"
+    if formulario_impuesto != formulario_esperado:
+        return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
+
+    scope = "cliente_id IS NULL" if cliente_id is None else "cliente_id = ?"
+    scope_params = () if cliente_id is None else (cliente_id,)
     if cuenta_id is not None:
-        existe=conn.execute("SELECT id FROM cuentas_contables WHERE cliente_id = ? AND codigo = ? AND id <> ?",(cliente_id,codigo,cuenta_id)).fetchone()
+        existe = conn.execute(f"SELECT id FROM cuentas_contables WHERE {scope} AND codigo = ? AND id <> ?", scope_params + (codigo, cuenta_id)).fetchone()
     else:
-        existe=conn.execute("SELECT id FROM cuentas_contables WHERE cliente_id = ? AND codigo = ?",(cliente_id,codigo)).fetchone()
+        existe = conn.execute(f"SELECT id FROM cuentas_contables WHERE {scope} AND codigo = ?", scope_params + (codigo,)).fetchone()
     if existe:
         return "Ya existe una cuenta con ese código."
+
     imputable = bool(data.get("imputable", True))
     if cuenta_id is not None:
-        hijos = conn.execute("SELECT COUNT(*) AS n FROM cuentas_contables WHERE cliente_id = ? AND cuenta_padre_id = ?", (cliente_id, cuenta_id)).fetchone()["n"]
-        movimientos = conn.execute("""SELECT COUNT(*) AS n FROM detalle_asientos d
+        hijos = conn.execute(f"SELECT COUNT(*) AS n FROM cuentas_contables WHERE {scope} AND cuenta_padre_id = ?", scope_params + (cuenta_id,)).fetchone()["n"]
+        movimiento_scope = "a.cliente_id IS NULL" if cliente_id is None else "a.cliente_id = ?"
+        movimiento_params = (cuenta_id,) if cliente_id is None else (cuenta_id, cliente_id)
+        movimientos = conn.execute(f"""SELECT COUNT(*) AS n FROM detalle_asientos d
                                       JOIN asientos_contables a ON a.id = d.asiento_id
-                                      WHERE d.cuenta_id = ? AND a.cliente_id = ?""", (cuenta_id, cliente_id)).fetchone()["n"]
+                                      WHERE d.cuenta_id = ? AND {movimiento_scope}""", movimiento_params).fetchone()["n"]
         if imputable and hijos:
             return "La cuenta tiene subcuentas y no puede ser imputable. Primero desactivá la imputabilidad."
         if not imputable and movimientos:
             return "La cuenta tiene movimientos y no puede convertirse en no imputable."
 
-    padre=data.get("cuenta_padre_id")
-    if padre not in (None,"","null"):
-        try: padre=int(padre)
-        except (TypeError,ValueError): return "La cuenta padre no es válida."
+    padre = data.get("cuenta_padre_id")
+    if padre not in (None, "", "null"):
+        try:
+            padre = int(padre)
+        except (TypeError, ValueError):
+            return "La cuenta padre no es válida."
         if cuenta_id is not None and padre == cuenta_id:
             return "Una cuenta no puede ser su propia cuenta padre."
-        padre_fila = conn.execute("SELECT id, imputable FROM cuentas_contables WHERE id = ? AND cliente_id = ?",(padre,cliente_id)).fetchone()
+        padre_fila = conn.execute(f"SELECT id, imputable FROM cuentas_contables WHERE id = ? AND {scope}", (padre,) + scope_params).fetchone()
         if not padre_fila:
             return "La cuenta padre no existe."
         if padre_fila["imputable"]:
