@@ -4,3 +4,6 @@ requests
 gunicorn
 bcrypt
 psycopg[binary]
+
+openpyxl
+reportlab
