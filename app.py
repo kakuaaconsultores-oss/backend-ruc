@@ -2758,7 +2758,32 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     if nivel < 1:
         return "El nivel debe ser mayor o igual a 1."
     imputable = bool(data.get("imputable", True))
-    if imputable and concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
+
+    # Las cuentas de dinero dentro del rubro DISPONIBILIDADES no necesitan
+    # una clasificación propia de flujo de efectivo. El Estado de Flujo de
+    # Efectivo se determinará por el movimiento que afecte a esas cuentas.
+    def _esta_en_disponibilidades(padre_id):
+        actual = padre_id
+        visitados = set()
+        while actual not in (None, "", "null") and actual not in visitados:
+            visitados.add(actual)
+            fila = conn.execute(
+                "SELECT id, nombre, cuenta_padre_id FROM cuentas_contables WHERE id = ?",
+                (int(actual),)
+            ).fetchone()
+            if not fila:
+                return False
+            if str(fila["nombre"] or "").strip().upper() == "DISPONIBILIDADES":
+                return True
+            actual = fila["cuenta_padre_id"]
+        return False
+
+    padre_contexto = data.get("cuenta_padre_id")
+    es_dinero_disponibilidad = (
+        tipo == "activo" and _esta_en_disponibilidades(padre_contexto)
+    )
+
+    if imputable and not es_dinero_disponibilidad and concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
         return "El concepto de Estado de Flujo de Efectivo es obligatorio para las cuentas imputables."
     if not imputable and concepto_flujo and concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
         return "El concepto de Estado de Flujo de Efectivo no es válido."
