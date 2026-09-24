@@ -99,10 +99,6 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
                 saldo REAL NOT NULL DEFAULT 0, estado TEXT NOT NULL DEFAULT 'pendiente',
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(comprobante_id,numero_cuota))""")
-            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN cuota_id INTEGER")
-            except Exception: pass
-            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN monto_aplicado REAL NOT NULL DEFAULT 0")
-            except Exception: pass
             conn.execute(f"""CREATE TABLE IF NOT EXISTS notas_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 tipo TEXT NOT NULL, numero TEXT NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0,
@@ -116,6 +112,10 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_pago_detalle (
                 id {id_col} PRIMARY KEY, orden_pago_id INTEGER NOT NULL, comprobante_id INTEGER,
                 concepto TEXT DEFAULT '', monto REAL NOT NULL DEFAULT 0)""")
+            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN cuota_id INTEGER")
+            except Exception: pass
+            try: conn.execute("ALTER TABLE ordenes_pago_detalle ADD COLUMN monto_aplicado REAL NOT NULL DEFAULT 0")
+            except Exception: pass
             conn.execute(f"""CREATE TABLE IF NOT EXISTS anticipos_proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 fecha TEXT NOT NULL, monto REAL NOT NULL DEFAULT 0, saldo REAL NOT NULL DEFAULT 0,
