@@ -3157,118 +3157,98 @@ def reporte_flujo_efectivo():
 
 
 
-def _renta_casillas(conn, cliente_id, formulario, desde, hasta):
-    filas = conn.execute("""
-        SELECT c.inciso_formulario AS inciso,
-               COALESCE(SUM(d.debe - d.haber), 0) AS importe
-        FROM detalle_asientos d
-        JOIN asientos_contables a ON a.id = d.asiento_id
-        JOIN cuentas_contables c ON c.id = d.cuenta_id
-        WHERE a.cliente_id = ?
-          AND a.estado = 'contabilizado'
-          AND a.fecha >= ?
-          AND a.fecha <= ?
-          AND c.cliente_id = ?
-          AND c.imputable = 1
-          AND c.formulario_impuesto = ?
-          AND c.inciso_formulario IS NOT NULL
-          AND TRIM(c.inciso_formulario) <> ''
-        GROUP BY c.inciso_formulario
-    """, (cliente_id, desde, hasta, cliente_id, formulario)).fetchall()
-    return {int(r["inciso"]): float(r["importe"] or 0) for r in filas if str(r["inciso"]).isdigit()}
+def _scope_clause(cliente_id, alias="c"):
+    return (f"{alias}.cliente_id IS NULL", ()) if cliente_id is None else (f"{alias}.cliente_id = ?", (cliente_id,))
 
-def _construir_formulario_renta(conn, cliente_id, desde, hasta):
-    cliente = conn.execute("SELECT * FROM clientes WHERE id = ? AND estado = 'activo'", (cliente_id,)).fetchone()
-    if not cliente:
-        raise ValueError("Cliente no encontrado.")
-    formulario = formulario_por_impuesto(str(cliente["tipo_impuesto"] or "").upper())
-    if formulario not in {"500", "501"}:
-        raise ValueError("El cliente seleccionado no utiliza el Formulario 500 o 501.")
-    valores = _renta_casillas(conn, cliente_id, formulario, desde, hasta)
-    definiciones = FORMULARIO_RENTA_CASILLAS[formulario]
-    if formulario == "501":
-        valores[12] = max(0, valores.get(10, 0) - valores.get(11, 0))
-        valores[14] = valores.get(13, 0) * 0.30
-        valores[21] = min(valores.get(12, 0), valores.get(14, 0))
-        valores[22] = valores[21] * 0.10
-        valores[19] = sum(valores.get(i, 0) for i in (15, 16, 17, 18))
-        valores[24] = valores.get(22, 0) + valores.get(23, 0)
-        valores[20] = max(0, valores[19] - valores[24])
-        valores[25] = max(0, valores[24] - valores[19])
-        valores[26] = valores.get(22, 0)
-        valores[27] = valores.get(16, 0) + valores.get(17, 0)
-        valores[28] = max(0, valores.get(76, valores.get(26, 0)) - valores.get(27, 0))
-        valores[29] = min(valores.get(20, 0), valores.get(28, 0))
-        valores[30] = max(0, valores.get(28, 0) - valores.get(29, 0)) * 0.25
-    return {"cliente": dict(cliente), "formulario": formulario, "version": "3" if formulario == "500" else "2",
-            "desde": desde, "hasta": hasta,
-            "casillas": [{"numero": n, "descripcion": d, "importe": round(float(valores.get(n, 0)), 2)} for n, d in definiciones.items()],
-            "nota": "Preliquidación generada desde la contabilidad de Kakuaa ERP. Debe ser revisada antes de su presentación en Marangatu."}
+def _renta_casillas(conn, cliente_id, formulario, desde, hasta):
+    scope_a, params_a = _scope_clause(cliente_id, "a")
+    scope_c, params_c = _scope_clause(cliente_id, "c")
+    filas = conn.execute(f"""
+        SELECT c.inciso_formulario AS inciso, COALESCE(SUM(d.debe - d.haber),0) AS importe
+        FROM detalle_asientos d
+        JOIN asientos_contables a ON a.id=d.asiento_id
+        JOIN cuentas_contables c ON c.id=d.cuenta_id
+        WHERE {scope_a} AND a.estado='contabilizado' AND a.fecha>=? AND a.fecha<=?
+          AND {scope_c} AND c.imputable=1 AND c.formulario_impuesto=?
+          AND c.inciso_formulario IS NOT NULL AND TRIM(c.inciso_formulario)<>''
+        GROUP BY c.inciso_formulario
+    """, params_a+(desde,hasta)+params_c+(formulario,)).fetchall()
+    return {int(r["inciso"]):float(r["importe"] or 0) for r in filas if str(r["inciso"]).isdigit()}
+
+def _construir_formulario_renta(conn, cliente_id, desde, hasta, formulario_forzado=None):
+    if cliente_id is None:
+        formulario=str(formulario_forzado or "").strip()
+        cliente={"razon_social":"Kakuaa Consultores · Catálogo maestro","ruc":"","dv":""}
+    else:
+        cliente=conn.execute("SELECT * FROM clientes WHERE id=? AND estado='activo'",(cliente_id,)).fetchone()
+        if not cliente: raise ValueError("Cliente no encontrado.")
+        formulario=formulario_por_impuesto(str(cliente["tipo_impuesto"] or "").upper())
+    if formulario not in {"500","501"}:
+        raise ValueError("Seleccioná un cliente IRE o elegí explícitamente el Formulario 500 o 501 desde el contexto maestro.")
+    valores=_renta_casillas(conn,cliente_id,formulario,desde,hasta)
+    definiciones=FORMULARIO_RENTA_CASILLAS[formulario]
+    if formulario=="501":
+        valores[12]=max(0,valores.get(10,0)-valores.get(11,0)); valores[14]=valores.get(13,0)*0.30
+        valores[21]=min(valores.get(12,0),valores.get(14,0)); valores[22]=valores[21]*0.10
+        valores[19]=sum(valores.get(i,0) for i in (15,16,17,18)); valores[24]=valores.get(22,0)+valores.get(23,0)
+        valores[20]=max(0,valores[19]-valores[24]); valores[25]=max(0,valores[24]-valores[19])
+        valores[26]=valores.get(22,0); valores[27]=valores.get(16,0)+valores.get(17,0)
+        valores[28]=max(0,valores.get(76,valores.get(26,0))-valores.get(27,0)); valores[29]=min(valores.get(20,0),valores.get(28,0))
+        valores[30]=max(0,valores.get(28,0)-valores.get(29,0))*0.25
+    return {"cliente":dict(cliente),"formulario":formulario,"version":"3" if formulario=="500" else "2","desde":desde,"hasta":hasta,
+            "casillas":[{"numero":n,"descripcion":d,"importe":round(float(valores.get(n,0)),2)} for n,d in definiciones.items()],
+            "nota":"Preliquidación generada desde la contabilidad de Kakuaa ERP. Debe ser revisada antes de su presentación en Marangatu."}
 
 @app.route("/api/contabilidad/reportes/formulario-renta", methods=["GET"])
 @admin_required
 def reporte_formulario_renta():
-    cliente_id, error_ctx = obtener_cliente_contable()
+    cliente_id,error_ctx=obtener_contexto_cuenta()
     if error_ctx: return error_ctx
-    desde = str(request.args.get("desde", "")).strip() or datetime.utcnow().strftime("%Y") + "-01-01"
-    hasta = str(request.args.get("hasta", "")).strip() or datetime.utcnow().strftime("%Y") + "-12-31"
-    try:
-        datetime.strptime(desde, "%Y-%m-%d"); datetime.strptime(hasta, "%Y-%m-%d")
-    except ValueError: return jsonify({"error": "Las fechas deben tener formato AAAA-MM-DD."}), 400
-    if desde > hasta: return jsonify({"error": "La fecha desde no puede ser posterior a la fecha hasta."}), 400
+    desde=str(request.args.get("desde","")).strip() or datetime.utcnow().strftime("%Y")+"-01-01"
+    hasta=str(request.args.get("hasta","")).strip() or datetime.utcnow().strftime("%Y")+"-12-31"
+    formulario=request.args.get("formulario")
+    try: datetime.strptime(desde,"%Y-%m-%d"); datetime.strptime(hasta,"%Y-%m-%d")
+    except ValueError: return jsonify({"error":"Las fechas deben tener formato AAAA-MM-DD."}),400
+    if desde>hasta:return jsonify({"error":"La fecha desde no puede ser posterior a la fecha hasta."}),400
     conn=get_db()
-    try: return jsonify(_construir_formulario_renta(conn, cliente_id, desde, hasta))
-    except ValueError as e: return jsonify({"error": str(e)}), 400
-    finally: conn.close()
+    try:return jsonify(_construir_formulario_renta(conn,cliente_id,desde,hasta,formulario))
+    except ValueError as e:return jsonify({"error":str(e)}),400
+    finally:conn.close()
 
 @app.route("/api/contabilidad/reportes/formulario-renta/<formato>", methods=["GET"])
 @admin_required
 def descargar_formulario_renta(formato):
-    cliente_id, error_ctx = obtener_cliente_contable()
-    if error_ctx: return error_ctx
-    formato = str(formato).strip().lower()
-    if formato not in {"xlsx", "pdf"}: return jsonify({"error": "Formato no válido. Usá xlsx o pdf."}), 400
-    desde = str(request.args.get("desde", "")).strip() or datetime.utcnow().strftime("%Y") + "-01-01"
-    hasta = str(request.args.get("hasta", "")).strip() or datetime.utcnow().strftime("%Y") + "-12-31"
-    try:
-        datetime.strptime(desde, "%Y-%m-%d"); datetime.strptime(hasta, "%Y-%m-%d")
-    except ValueError: return jsonify({"error": "Las fechas deben tener formato AAAA-MM-DD."}), 400
+    cliente_id,error_ctx=obtener_contexto_cuenta()
+    if error_ctx:return error_ctx
+    formato=str(formato).strip().lower()
+    if formato not in {"xlsx","pdf"}:return jsonify({"error":"Formato no válido. Usá xlsx o pdf."}),400
+    desde=str(request.args.get("desde","")).strip() or datetime.utcnow().strftime("%Y")+"-01-01"
+    hasta=str(request.args.get("hasta","")).strip() or datetime.utcnow().strftime("%Y")+"-12-31"
+    formulario=request.args.get("formulario")
+    try:datetime.strptime(desde,"%Y-%m-%d");datetime.strptime(hasta,"%Y-%m-%d")
+    except ValueError:return jsonify({"error":"Las fechas deben tener formato AAAA-MM-DD."}),400
     conn=get_db()
-    try: reporte=_construir_formulario_renta(conn, cliente_id, desde, hasta)
-    except ValueError as e: conn.close(); return jsonify({"error": str(e)}), 400
+    try:reporte=_construir_formulario_renta(conn,cliente_id,desde,hasta,formulario)
+    except ValueError as e:conn.close();return jsonify({"error":str(e)}),400
     finally:
-        try: conn.close()
-        except Exception: pass
-    razon=str(reporte["cliente"]["razon_social"]).replace("/", "-")
-    nombre=f"Formulario_{reporte['formulario']}_{razon}_{desde}_{hasta}"
-    if formato == "xlsx":
-        wb=Workbook(); ws=wb.active; ws.title=f"Form {reporte['formulario']}"
-        ws["A1"]=f"FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}"
-        ws.merge_cells("A1:C1"); ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
-        ws.append(["RUC",reporte["cliente"]["ruc"],"DV",reporte["cliente"].get("dv","")])
-        ws.append(["Razón Social",reporte["cliente"]["razon_social"]]); ws.append(["Período",f"{desde} al {hasta}"]); ws.append([])
-        ws.append(["INC./CASILLA","DESCRIPCIÓN","IMPORTE"])
+        try:conn.close()
+        except Exception:pass
+    razon=str(reporte["cliente"].get("razon_social","Kakuaa")).replace("/","-"); nombre=f"Formulario_{reporte['formulario']}_{razon}_{desde}_{hasta}"
+    if formato=="xlsx":
+        wb=Workbook();ws=wb.active;ws.title=f"Form {reporte['formulario']}";ws["A1"]=f"FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}";ws.merge_cells("A1:C1")
+        ws["A1"].font=Font(bold=True,size=14);ws["A1"].alignment=Alignment(horizontal="center");ws.append(["RUC",reporte["cliente"].get("ruc",""),"DV",reporte["cliente"].get("dv","")]);ws.append(["Razón Social",reporte["cliente"]["razon_social"]]);ws.append(["Período",f"{desde} al {hasta}"]);ws.append([]);ws.append(["INC./CASILLA","DESCRIPCIÓN","IMPORTE"])
         thin=Side(style="thin",color="B7B7B7")
-        for cell in ws[6]: cell.font=Font(bold=True); cell.border=Border(bottom=thin)
-        for item in reporte["casillas"]: ws.append([item["numero"],item["descripcion"],item["importe"]])
-        for row in ws.iter_rows(min_row=7,min_col=3,max_col=3): row[0].number_format='#,##0'
-        ws.column_dimensions["A"].width=16; ws.column_dimensions["B"].width=72; ws.column_dimensions["C"].width=18; ws.freeze_panes="A7"
-        ws.cell(ws.max_row+2,1,reporte["nota"]); ws.merge_cells(start_row=ws.max_row+2,start_column=1,end_row=ws.max_row+2,end_column=3)
-        output=io.BytesIO(); wb.save(output); output.seek(0)
+        for cell in ws[6]:cell.font=Font(bold=True);cell.border=Border(bottom=thin)
+        for item in reporte["casillas"]:ws.append([item["numero"],item["descripcion"],item["importe"]])
+        for row in ws.iter_rows(min_row=7,min_col=3,max_col=3):row[0].number_format='#,##0'
+        ws.column_dimensions["A"].width=16;ws.column_dimensions["B"].width=72;ws.column_dimensions["C"].width=18;ws.freeze_panes="A7";output=io.BytesIO();wb.save(output);output.seek(0)
         from flask import send_file
         return send_file(output,as_attachment=True,download_name=nombre+".xlsx",mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    styles=getSampleStyleSheet(); output=io.BytesIO()
-    doc=SimpleDocTemplate(output,pagesize=A4,rightMargin=28,leftMargin=28,topMargin=28,bottomMargin=28)
-    story=[Paragraph(f"<b>FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}</b>",styles["Title"]),
-           Paragraph(f"RUC: {html.escape(str(reporte['cliente']['ruc']))} &nbsp;&nbsp; DV: {html.escape(str(reporte['cliente'].get('dv','')))}",styles["Normal"]),
-           Paragraph(f"Razón Social: {html.escape(str(reporte['cliente']['razon_social']))}",styles["Normal"]),
-           Paragraph(f"Período: {desde} al {hasta}",styles["Normal"]),Spacer(1,10)]
-    data=[["INC./CASILLA","DESCRIPCIÓN","IMPORTE"]]+[[str(x["numero"]),x["descripcion"],f"{x['importe']:,.0f}"] for x in reporte["casillas"]]
-    table=Table(data,colWidths=[65,370,90],repeatRows=1)
-    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1a2a5e")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.grey),("ALIGN",(2,1),(2,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8)]))
-    story += [table,Spacer(1,10),Paragraph(html.escape(reporte["nota"]),styles["Normal"])]
-    doc.build(story); output.seek(0)
-    from flask import send_file
+    styles=getSampleStyleSheet();output=io.BytesIO();doc=SimpleDocTemplate(output,pagesize=A4,rightMargin=28,leftMargin=28,topMargin=28,bottomMargin=28)
+    story=[Paragraph(f"<b>FORMULARIO N° {reporte['formulario']} — IRE {'GENERAL' if reporte['formulario']=='500' else 'SIMPLE'}</b>",styles["Title"]),Paragraph(f"RUC: {html.escape(str(reporte['cliente'].get('ruc','')))} &nbsp;&nbsp; DV: {html.escape(str(reporte['cliente'].get('dv','')))}",styles["Normal"]),Paragraph(f"Razón Social: {html.escape(str(reporte['cliente']['razon_social']))}",styles["Normal"]),Paragraph(f"Período: {desde} al {hasta}",styles["Normal"]),Spacer(1,10)]
+    data=[["INC./CASILLA","DESCRIPCIÓN","IMPORTE"]]+[[str(x["numero"]),x["descripcion"],f"{x['importe']:,.0f}"] for x in reporte["casillas"]];table=Table(data,colWidths=[65,370,90],repeatRows=1)
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#1a2a5e")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),0.4,colors.grey),("ALIGN",(2,1),(2,-1),"RIGHT"),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8)]));story += [table,Spacer(1,10),Paragraph(html.escape(reporte["nota"]),styles["Normal"])]
+    doc.build(story);output.seek(0);from flask import send_file
     return send_file(output,as_attachment=True,download_name=nombre+".pdf",mimetype="application/pdf")
 
 # Consulta pública de RUC mediante la API de integración de TuRuc.
