@@ -222,9 +222,15 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                     if tipo == "dias" and dias < 0: return jsonify({"error":"Los días no pueden ser negativos."}),400
                     if tipo == "cuotas" and cuotas < 1: return jsonify({"error":"La cantidad de cuotas debe ser al menos 1."}),400
                     d["tipo"], d["dias_credito"], d["cuotas"] = tipo, (dias if tipo=="dias" else 0), (cuotas if tipo=="cuotas" else 1)
-                cols="cliente_id,"+",".join(fields); vals=[cid]+[d.get(x) for x in fields]
-                ph=",".join(["?"]*len(cols))
-                conn.execute(f"INSERT INTO {table}({cols}) VALUES({ph})",vals); conn.commit()
+                cols="cliente_id,"+",".join(fields)
+                vals=[cid]+[d.get(x) for x in fields]
+                # Construimos los placeholders según el motor para evitar que
+                # PostgreSQL interprete accidentalmente parámetros de una consulta
+                # anterior o de una cadena literal.
+                ph=",".join(["%s"]*len(cols)) if os.environ.get("DATABASE_URL") else ",".join(["?"]*len(cols))
+                sql=f"INSERT INTO {table}({cols}) VALUES({ph})"
+                conn.execute(sql, vals)
+                conn.commit()
                 return jsonify({"ok":True}),201
             except Exception as e:
                 conn.rollback(); return jsonify({"error":str(e)}),400
@@ -240,6 +246,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             finally: conn.close()
 
     crud_catalogo("/api/compras/tipos-comprobante","tipos_comprobante_compra",["codigo","nombre","activo"])
+    # Alias de compatibilidad con instalaciones/frontend antiguos.
+    crud_catalogo("/api/compras/tipos_comprobante_compra","tipos_comprobante_compra",["codigo","nombre","activo"])
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
     crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
