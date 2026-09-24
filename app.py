@@ -2752,7 +2752,10 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         return "La naturaleza debe ser deudora o acreedora."
     if nivel < 1:
         return "El nivel debe ser mayor o igual a 1."
-    if concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
+    imputable = bool(data.get("imputable", True))
+    if imputable and concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
+        return "El concepto de Estado de Flujo de Efectivo es obligatorio para las cuentas imputables."
+    if not imputable and concepto_flujo and concepto_flujo not in set(FLUJO_EFECTIVO_CLASIFICACIONES):
         return "El concepto de Estado de Flujo de Efectivo no es válido."
 
     formulario_esperado = str(data.get("formulario_impuesto", "")).strip().upper() if cliente_id is None else "NO_APLICA"
