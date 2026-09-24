@@ -2645,7 +2645,10 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         fila_cliente = conn.execute("SELECT tipo_impuesto FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
         if not fila_cliente:
             return "El cliente seleccionado no existe."
-        formulario_esperado = formulario_por_impuesto(fila_cliente["tipo_impuesto"]) or "NO_APLICA"
+        tipo_impuesto_cliente = str(fila_cliente["tipo_impuesto"] or "").strip().upper()
+        if tipo_impuesto_cliente not in CLIENTE_IMPUESTOS_VALIDOS:
+            return "El cliente seleccionado todavía no tiene un tipo de impuesto definido."
+        formulario_esperado = formulario_por_impuesto(tipo_impuesto_cliente) or "NO_APLICA"
     if formulario_impuesto != formulario_esperado:
         return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
 
@@ -2672,6 +2675,8 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
             return "La cuenta tiene movimientos y no puede convertirse en no imputable."
 
     padre = data.get("cuenta_padre_id")
+    if nivel > 1 and padre in (None, "", "null"):
+        return "Las cuentas de nivel 2 o superior deben tener una cuenta padre."
     if padre not in (None, "", "null"):
         try:
             padre = int(padre)
