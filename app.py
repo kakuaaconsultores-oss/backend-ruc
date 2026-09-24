@@ -1069,8 +1069,8 @@ def crear_cliente():
         nuevo_id = insertar_y_obtener_id(
             conn,
             """INSERT INTO clientes
-               (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por, tipo_impuesto)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?, ?)""",
+               (ruc, dv, razon_social, nombre_comercial, tipo_persona, documento, correo, telefono, direccion, estado, creado_por, tipo_impuesto, tipos_impuesto)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'activo', ?, ?, ?)""",
             (ruc, dv, razon, nombre_comercial, tipo, documento, correo, telefono, direccion, usuario["id"], tipo_impuesto, ",".join(impuestos))
         )
         for codigo in obligaciones:
