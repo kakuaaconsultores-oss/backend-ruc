@@ -227,11 +227,36 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 # Construimos los placeholders según el motor para evitar que
                 # PostgreSQL interprete accidentalmente parámetros de una consulta
                 # anterior o de una cadena literal.
-                ph=",".join(["%s"]*len(cols)) if os.environ.get("DATABASE_URL") else ",".join(["?"]*len(cols))
+                ph=",".join(["?"]*(len(fields)+1))
                 sql=f"INSERT INTO {table}({cols}) VALUES({ph})"
                 conn.execute(sql, vals)
                 conn.commit()
                 return jsonify({"ok":True}),201
+            except Exception as e:
+                conn.rollback(); return jsonify({"error":str(e)}),400
+            finally: conn.close()
+        @app.put(path+"/<int:item_id>", endpoint="compras_update_"+table)
+        @staff_required
+        def update_item(item_id):
+            d=parse_json(); conn=get_db()
+            try:
+                cid,err=_cliente_id(conn)
+                if err:return jsonify({"error":err}),401
+                if not d.get("codigo") or not d.get("nombre"):
+                    return jsonify({"error":"Código y nombre son obligatorios."}),400
+                row=conn.execute(f"SELECT id FROM {table} WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+                if not row:return jsonify({"error":"Registro no encontrado."}),404
+                if table == "condiciones_compra":
+                    tipo=(d.get("tipo") or "dias").strip().lower()
+                    dias=int(d.get("dias_credito") or 0); cuotas=int(d.get("cuotas") or 1)
+                    if tipo not in ("dias","cuotas"):return jsonify({"error":"Tipo de condición inválido."}),400
+                    if tipo=="dias" and dias<0:return jsonify({"error":"Los días no pueden ser negativos."}),400
+                    if tipo=="cuotas" and cuotas<1:return jsonify({"error":"La cantidad de cuotas debe ser al menos 1."}),400
+                    d["tipo"],d["dias_credito"],d["cuotas"]=tipo,(dias if tipo=="dias" else 0),(cuotas if tipo=="cuotas" else 1)
+                sets=",".join(f"{field}=?" for field in fields)
+                vals=[d.get(field) for field in fields]+[item_id,cid]
+                conn.execute(f"UPDATE {table} SET {sets} WHERE id=? AND cliente_id=?",vals)
+                conn.commit(); return jsonify({"ok":True})
             except Exception as e:
                 conn.rollback(); return jsonify({"error":str(e)}),400
             finally: conn.close()
