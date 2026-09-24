@@ -246,8 +246,6 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             finally: conn.close()
 
     crud_catalogo("/api/compras/tipos-comprobante","tipos_comprobante_compra",["codigo","nombre","activo"])
-    # Alias de compatibilidad con instalaciones/frontend antiguos.
-    crud_catalogo("/api/compras/tipos_comprobante_compra","tipos_comprobante_compra",["codigo","nombre","activo"])
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
     crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
