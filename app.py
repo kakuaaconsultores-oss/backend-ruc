@@ -2764,6 +2764,8 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         if tipo_impuesto_cliente not in CLIENTE_IMPUESTOS_VALIDOS:
             return "El cliente seleccionado todavía no tiene un tipo de impuesto definido."
         formulario_esperado = formulario_por_impuesto(tipo_impuesto_cliente) or "NO_APLICA"
+    if cliente_id is None and formulario_esperado not in {"NO_APLICA", "500", "501"}:
+        return "En el Catálogo maestro de Kakuaa solo se permiten NO_APLICA, Formulario 500 o Formulario 501."
     if formulario_impuesto != formulario_esperado:
         return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
     if formulario_esperado in {"500", "501"}:
