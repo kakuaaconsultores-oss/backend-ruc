@@ -273,32 +273,6 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.rollback(); return jsonify({"error":str(e)}),400
         finally: conn.close()
 
-    @app.put("/api/compras/proveedores/<int:proveedor_id>")
-    @staff_required
-    def editar_proveedor(proveedor_id):
-        d=parse_json(); conn=get_db()
-        try:
-            cid,err=_cliente_id(conn)
-            if err:return jsonify({"error":err}),401
-            row=conn.execute("SELECT * FROM proveedores WHERE id=? AND cliente_id=?",(proveedor_id,cid)).fetchone()
-            if not row:return jsonify({"error":"Proveedor no encontrado."}),404
-            ruc=(d.get("ruc") or "").strip().upper()
-            razon=(d.get("razon_social") or "").strip()
-            if not ruc:return jsonify({"error":"El RUC es obligatorio."}),400
-            if not razon:return jsonify({"error":"La razón social es obligatoria."}),400
-            existente=conn.execute("SELECT id FROM proveedores WHERE cliente_id=? AND UPPER(ruc)=? AND id<>? LIMIT 1",(cid,ruc,proveedor_id)).fetchone()
-            if existente:return jsonify({"error":"Ya existe otro proveedor con ese RUC en este cliente."}),409
-            conn.execute("""UPDATE proveedores SET ruc=?,razon_social=?,nombre_comercial=?,documento=?,correo=?,telefono=?,direccion=?,
-                condicion_compra_id=?,forma_pago_id=?,cuenta_contable_id=? WHERE id=? AND cliente_id=?""",
-                (ruc,razon,(d.get("nombre_comercial") or "").strip(),(d.get("documento") or "").strip(),
-                 (d.get("correo") or "").strip(),(d.get("telefono") or "").strip(),(d.get("direccion") or "").strip(),
-                 d.get("condicion_compra_id"),d.get("forma_pago_id"),d.get("cuenta_contable_id"),proveedor_id,cid))
-            conn.commit()
-            return jsonify({"ok":True,"id":proveedor_id})
-        except Exception as e:
-            conn.rollback(); return jsonify({"error":str(e)}),400
-        finally: conn.close()
-
     @app.get("/api/compras/proveedores/<int:proveedor_id>/timbrados")
     @usuario_required
     def listar_timbrados_proveedor(proveedor_id):
