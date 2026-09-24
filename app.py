@@ -2735,6 +2735,8 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
     if formulario_impuesto != formulario_esperado:
         return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
     if formulario_esperado in {"500", "501"}:
+        if bool(data.get("imputable", True)) and not inciso_formulario:
+            return "La referencia/casilla del Formulario 500/501 es obligatoria para una cuenta imputable."
         if not bool(data.get("imputable", True)) and inciso_formulario:
             return "El inciso/casilla del Formulario 500/501 solo puede asignarse a cuentas imputables."
         if bool(data.get("imputable", True)) and inciso_formulario:
