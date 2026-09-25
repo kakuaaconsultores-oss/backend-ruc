@@ -569,6 +569,8 @@ def init_db_postgres():
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_usuario ON usuario_clientes(usuario_id, cliente_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_cliente ON usuario_clientes(cliente_id, usuario_id)")
+        conn.execute("ALTER TABLE usuario_clientes ADD COLUMN IF NOT EXISTS rol_empresa TEXT NOT NULL DEFAULT 'operativo'")
+        conn.execute("ALTER TABLE usuario_clientes ADD COLUMN IF NOT EXISTS activo INTEGER NOT NULL DEFAULT 1")
         # ==================== CONTABILIDAD ====================
         conn.execute("""CREATE TABLE IF NOT EXISTS cuentas_contables (
             id BIGSERIAL PRIMARY KEY,
