@@ -69,6 +69,9 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 ("condiciones_compra", "tipo", "TEXT NOT NULL DEFAULT 'dias'"),
                 ("condiciones_compra", "cuotas", "INTEGER NOT NULL DEFAULT 1"),
                 ("formas_pago_compra", "cuenta_contable_id", "INTEGER"),
+                ("conceptos_compra", "unidad_medida", "TEXT NOT NULL DEFAULT ''"),
+                ("conceptos_compra", "stock_minimo", "REAL NOT NULL DEFAULT 0"),
+                ("conceptos_compra", "concepto_presupuestario", "TEXT DEFAULT NULL"),
             ):
                 if not _column_exists(table, column):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -93,7 +96,9 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
-                cuenta_contable_id INTEGER DEFAULT NULL, tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
+                unidad_medida TEXT NOT NULL DEFAULT '', stock_minimo REAL NOT NULL DEFAULT 0,
+                cuenta_contable_id INTEGER DEFAULT NULL, concepto_presupuestario TEXT DEFAULT NULL,
+                tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
@@ -213,7 +218,10 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 "tipos_comprobante": rows("SELECT * FROM tipos_comprobante_compra WHERE cliente_id=? ORDER BY nombre"),
                 "condiciones": rows("SELECT * FROM condiciones_compra WHERE cliente_id=? ORDER BY nombre"),
                 "formas_pago": rows("SELECT * FROM formas_pago_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre"),
-                "conceptos": rows("SELECT * FROM conceptos_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre")
+                "conceptos": rows("""SELECT c.*,
+                    CASE WHEN c.activo=1 AND COALESCE(TRIM(c.concepto_presupuestario),'')<>'' AND c.cuenta_contable_id IS NOT NULL
+                         THEN 1 ELSE 0 END AS habilitado_compras
+                    FROM conceptos_compra c WHERE c.cliente_id=? ORDER BY c.codigo::INTEGER, c.nombre""")
             })
         finally: conn.close()
 
@@ -522,7 +530,123 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
     crud_catalogo("/api/compras/tipos-comprobante","tipos_comprobante_compra",["codigo","nombre","activo"])
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
-    crud_catalogo("/api/compras/conceptos","conceptos_compra",["codigo","nombre","descripcion","tipo","cuenta_contable_id","tasa_iva"])
+    @app.get("/api/compras/conceptos/disponibles")
+    @usuario_required
+    def listar_conceptos_compra_disponibles():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT c.*, cc.codigo AS cuenta_codigo, cc.nombre AS cuenta_nombre
+                FROM conceptos_compra c
+                LEFT JOIN cuentas_contables cc ON cc.id=c.cuenta_contable_id
+                WHERE c.cliente_id=? AND c.activo=1
+                  AND c.cuenta_contable_id IS NOT NULL
+                  AND COALESCE(TRIM(c.concepto_presupuestario),'')<>''
+                ORDER BY c.codigo""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally: conn.close()
+
+    @app.post("/api/compras/conceptos")
+    @staff_required
+    def crear_concepto_compra():
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            descripcion=(d.get("descripcion") or d.get("nombre") or "").strip()
+            unidad=(d.get("unidad_medida") or "").strip()
+            if not descripcion:return jsonify({"error":"La descripción es obligatoria."}),400
+            if not unidad:return jsonify({"error":"La unidad de medida es obligatoria."}),400
+            try: stock=float(d.get("stock_minimo") or 0)
+            except (TypeError,ValueError): return jsonify({"error":"El stock mínimo debe ser numérico."}),400
+            if stock<0:return jsonify({"error":"El stock mínimo no puede ser negativo."}),400
+            try: iva=float(d.get("tasa_iva"))
+            except (TypeError,ValueError): return jsonify({"error":"El tipo IVA es obligatorio."}),400
+            if iva not in (0,5,10):return jsonify({"error":"El tipo IVA debe ser 0%, 5% o 10%."}),400
+            rid=insertar_id(conn,"INSERT INTO conceptos_compra(cliente_id,codigo,nombre,descripcion,tipo,unidad_medida,stock_minimo,cuenta_contable_id,concepto_presupuestario,tasa_iva,activo) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (cid,"0",descripcion,descripcion,(d.get("tipo") or "bien").strip(),unidad,stock,None,None,iva,1))
+            codigo=str(rid)
+            conn.execute("UPDATE conceptos_compra SET codigo=? WHERE id=? AND cliente_id=?",(codigo,rid,cid))
+            conn.commit();return jsonify({"ok":True,"id":rid,"codigo":codigo}),201
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.put("/api/compras/conceptos/<int:item_id>")
+    @staff_required
+    def editar_concepto_compra(item_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Ítem no encontrado."}),404
+            descripcion=(d.get("descripcion") or "").strip()
+            unidad=(d.get("unidad_medida") or "").strip()
+            if not descripcion:return jsonify({"error":"La descripción es obligatoria."}),400
+            if not unidad:return jsonify({"error":"La unidad de medida es obligatoria."}),400
+            try: stock=float(d.get("stock_minimo") or 0)
+            except (TypeError,ValueError):return jsonify({"error":"El stock mínimo debe ser numérico."}),400
+            if stock<0:return jsonify({"error":"El stock mínimo no puede ser negativo."}),400
+            try: iva=float(d.get("tasa_iva"))
+            except (TypeError,ValueError):return jsonify({"error":"El tipo IVA es obligatorio."}),400
+            if iva not in (0,5,10):return jsonify({"error":"El tipo IVA debe ser 0%, 5% o 10%."}),400
+            activo=1 if str(d.get("estado","activo")).lower() in ("activo","1","true","on") else 0
+            conn.execute("UPDATE conceptos_compra SET nombre=?,descripcion=?,unidad_medida=?,stock_minimo=?,tasa_iva=?,activo=? WHERE id=? AND cliente_id=?",
+                (descripcion,descripcion,unidad,stock,iva,activo,item_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.delete("/api/compras/conceptos/<int:item_id>")
+    @staff_required
+    def eliminar_concepto_compra(item_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            conn.execute("UPDATE conceptos_compra SET activo=0 WHERE id=? AND cliente_id=?",(item_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        finally:conn.close()
+
+    @app.put("/api/contabilidad/cuentas-articulos/<int:item_id>")
+    @staff_required
+    def asignar_contabilidad_articulo(item_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT id FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Ítem no encontrado."}),404
+            concepto=(d.get("concepto_presupuestario") or "").strip()
+            cuenta=d.get("cuenta_contable_id")
+            if not concepto:return jsonify({"error":"El concepto presupuestario es obligatorio."}),400
+            if cuenta in (None,"","null"):return jsonify({"error":"La cuenta contable es obligatoria."}),400
+            try: cuenta=int(cuenta)
+            except (TypeError,ValueError):return jsonify({"error":"Cuenta contable inválida."}),400
+            ok=conn.execute("SELECT id FROM cuentas_contables WHERE id=? AND (cliente_id=? OR cliente_id IS NULL) AND activa=1 AND imputable=1",(cuenta,cid)).fetchone()
+            if not ok:return jsonify({"error":"La cuenta contable seleccionada no existe, no pertenece al cliente o no es imputable/activa."}),400
+            conn.execute("UPDATE conceptos_compra SET concepto_presupuestario=?,cuenta_contable_id=? WHERE id=? AND cliente_id=?",(concepto,cuenta,item_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.get("/api/contabilidad/cuentas-articulos")
+    @usuario_required
+    def listar_cuentas_articulos():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT c.*, cc.codigo AS cuenta_codigo, cc.nombre AS cuenta_nombre
+                FROM conceptos_compra c
+                LEFT JOIN cuentas_contables cc ON cc.id=c.cuenta_contable_id
+                WHERE c.cliente_id=? ORDER BY c.codigo""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
 
     @app.put("/api/compras/formas_pago_compra/<int:item_id>")
     @staff_required
