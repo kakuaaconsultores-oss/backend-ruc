@@ -223,7 +223,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                          THEN 1 ELSE 0 END AS habilitado_compras
                     FROM conceptos_compra c
                     LEFT JOIN cuentas_contables cc ON cc.id=c.cuenta_contable_id
-                    WHERE c.cliente_id=? ORDER BY CAST(c.codigo AS INTEGER), c.nombre""")
+                    WHERE c.cliente_id=? ORDER BY c.codigo, c.nombre""")
             })
         finally: conn.close()
 
