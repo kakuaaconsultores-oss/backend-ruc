@@ -221,7 +221,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 "conceptos": rows("""SELECT c.*,
                     CASE WHEN c.activo=1 AND COALESCE(TRIM(c.concepto_presupuestario),'')<>'' AND c.cuenta_contable_id IS NOT NULL
                          THEN 1 ELSE 0 END AS habilitado_compras
-                    FROM conceptos_compra c WHERE c.cliente_id=? ORDER BY c.codigo::INTEGER, c.nombre""")
+                    FROM conceptos_compra c WHERE c.cliente_id=? ORDER BY CAST(c.codigo AS INTEGER), c.nombre""")
             })
         finally: conn.close()
 
