@@ -230,12 +230,84 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
     @app.get("/api/compras/proveedores/consulta-ruc/<path:ruc>")
     @usuario_required
     def consultar_ruc_proveedor(ruc):
+        """Consulta RUC usando el servicio oficial de DNIT.
+
+        La interfaz de Kakuaa se mantiene estable. La fuente oficial se
+        configura mediante DNIT_RUC_API_KEY en el entorno de Render.
+        Mientras no exista la clave, se conserva TuRuc como respaldo
+        temporal para no interrumpir el ERP durante la migración.
+        """
         ruc = urllib.parse.unquote(str(ruc or "")).strip().upper()
         if not ruc:
             return jsonify({"error":"Ingresá un RUC."}),400
+
         try:
+            # DNIT recibe RUC y DV por separado. Kakuaa normalmente recibe
+            # "RUC-DV", por ejemplo "80012345-6".
+            if "-" in ruc:
+                ruc_base, dv = ruc.rsplit("-", 1)
+                ruc_base = ruc_base.strip()
+                dv = dv.strip()
+            else:
+                ruc_base, dv = ruc, ""
+
+            dnit_key = (os.environ.get("DNIT_RUC_API_KEY") or "").strip()
+            if dnit_key:
+                if not ruc_base or not dv:
+                    return jsonify({"error":"Ingresá el RUC con su DV, por ejemplo 80012345-6."}),400
+
+                query = urllib.parse.urlencode({
+                    "apiKey": dnit_key,
+                    "ruc": ruc_base,
+                    "dv": dv,
+                })
+                url = "https://servicios.set.gov.py/EsetApiWS/ApiWS/consultaRUC?" + query
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "Accept":"application/json",
+                        "User-Agent":"Kakuaa-ERP/1.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+
+                contribuyente = payload.get("contribuyente") or {}
+                estado_respuesta = str(payload.get("estado") or "").upper()
+                codigo = str(payload.get("codigo") or "").upper()
+
+                if estado_respuesta not in ("VALIDO", "VÁLIDO") and codigo not in ("VALIDO", "VÁLIDO"):
+                    return jsonify({
+                        "error":"La DNIT no encontró un contribuyente válido para ese RUC."
+                    }),404
+
+                if not contribuyente or not contribuyente.get("razonSocial"):
+                    return jsonify({"error":"La DNIT no devolvió datos para ese RUC."}),404
+
+                tipo_persona = str(contribuyente.get("tipoPersona") or "").upper()
+                return jsonify({"ok":True,"data":{
+                    "ruc":ruc,
+                    "razon_social":contribuyente.get("razonSocial") or "",
+                    "dv":dv,
+                    "documento":ruc_base,
+                    "estado":contribuyente.get("estado") or "",
+                    "categoria":contribuyente.get("categoria") or "",
+                    "mes_cierre":contribuyente.get("mesCierre") or "",
+                    "tipo_persona":contribuyente.get("tipoPersona") or "",
+                    "ruc_anterior":contribuyente.get("rucAnterior") or "",
+                    "tipo_sociedad":contribuyente.get("tipoSociedad") or "",
+                    "nombre_comercial":contribuyente.get("nombreComercial") or "",
+                    "es_persona_juridica":tipo_persona in ("JURIDICO","JURÍDICO"),
+                    "es_entidad_publica":False,
+                    "fuente":"DNIT",
+                }})
+
+            # Respaldo temporal: se mantiene hasta cargar DNIT_RUC_API_KEY.
             url = "https://turuc.com.py/api/contribuyente/" + urllib.parse.quote(ruc, safe="-")
-            req = urllib.request.Request(url, headers={"Accept":"application/json","User-Agent":"Kakuaa-ERP/1.0"})
+            req = urllib.request.Request(
+                url,
+                headers={"Accept":"application/json","User-Agent":"Kakuaa-ERP/1.0"},
+            )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             data = payload.get("data") or {}
@@ -248,10 +320,15 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 "documento":data.get("doc"),
                 "estado":data.get("estado") or "",
                 "es_persona_juridica":bool(data.get("esPersonaJuridica")),
-                "es_entidad_publica":bool(data.get("esEntidadPublica"))
+                "es_entidad_publica":bool(data.get("esEntidadPublica")),
+                "fuente":"TuRuc",
             }})
-        except Exception as e:
-            return jsonify({"error":"No se pudo consultar TuRuc en este momento. Podés volver a intentar."}),502
+        except urllib.error.HTTPError as e:
+            return jsonify({"error":"La fuente de consulta de RUC no respondió correctamente."}),502
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            return jsonify({"error":"No se pudo consultar la fuente de RUC en este momento. Podés volver a intentar."}),502
+        except Exception:
+            return jsonify({"error":"No se pudo consultar la fuente de RUC en este momento. Podés volver a intentar."}),502
 
     @app.post("/api/compras/proveedores")
     @staff_required
