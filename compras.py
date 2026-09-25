@@ -218,10 +218,12 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 "tipos_comprobante": rows("SELECT * FROM tipos_comprobante_compra WHERE cliente_id=? ORDER BY nombre"),
                 "condiciones": rows("SELECT * FROM condiciones_compra WHERE cliente_id=? ORDER BY nombre"),
                 "formas_pago": rows("SELECT * FROM formas_pago_compra WHERE cliente_id=? AND activo=1 ORDER BY nombre"),
-                "conceptos": rows("""SELECT c.*,
+                "conceptos": rows("""SELECT c.*, cc.codigo AS cuenta_codigo, cc.nombre AS cuenta_nombre,
                     CASE WHEN c.activo=1 AND COALESCE(TRIM(c.concepto_presupuestario),'')<>'' AND c.cuenta_contable_id IS NOT NULL
                          THEN 1 ELSE 0 END AS habilitado_compras
-                    FROM conceptos_compra c WHERE c.cliente_id=? ORDER BY CAST(c.codigo AS INTEGER), c.nombre""")
+                    FROM conceptos_compra c
+                    LEFT JOIN cuentas_contables cc ON cc.id=c.cuenta_contable_id
+                    WHERE c.cliente_id=? ORDER BY CAST(c.codigo AS INTEGER), c.nombre""")
             })
         finally: conn.close()
 
@@ -814,8 +816,20 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                     importe=base if i<cantidad else round(total-base*(cantidad-1),2)
                     conn.execute("INSERT INTO cuotas_compras(cliente_id,comprobante_id,numero_cuota,fecha_vencimiento,importe,saldo,estado) VALUES(?,?,?,?,?,?,?)",(cid,cidc,i,venc.isoformat(),importe,importe,"pendiente"))
             for item in d.get("detalle",[]):
+                concepto_id=item.get("concepto_id")
+                iva_tasa=float(item.get("iva_tasa",10) or 0)
+                cuenta_detalle=item.get("cuenta_contable_id")
+                if concepto_id not in (None,"","null"):
+                    concepto=conn.execute("""SELECT * FROM conceptos_compra
+                        WHERE id=? AND cliente_id=? AND activo=1
+                          AND cuenta_contable_id IS NOT NULL
+                          AND COALESCE(TRIM(concepto_presupuestario),'')<>''""",(int(concepto_id),cid)).fetchone()
+                    if not concepto:
+                        return jsonify({"error":"El ítem seleccionado todavía no está habilitado por Contabilidad."}),400
+                    iva_tasa=float(concepto["tasa_iva"] or 0)
+                    cuenta_detalle=concepto["cuenta_contable_id"]
                 conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id) VALUES(?,?,?,?,?,?,?,?)""",
-                    (cidc,item.get("concepto_id"),item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),float(item.get("iva_tasa",10) or 0),float(item.get("subtotal",0) or 0),item.get("cuenta_contable_id")))
+                    (cidc,concepto_id,item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),iva_tasa,float(item.get("subtotal",0) or 0),cuenta_detalle))
             conn.commit(); return jsonify({"id":cidc}),201
         except Exception as e:
             conn.rollback(); return jsonify({"error":str(e)}),400
