@@ -988,11 +988,11 @@ def _cliente_dict(conn, fila):
     }
 
 def _puede_acceder_cliente(conn, usuario, cliente_id):
-    if usuario["rol"] in ("superadmin", "admin"):
+    if str(usuario["rol"]).lower() == "superadmin":
         return True
     fila = conn.execute(
         """SELECT 1 FROM usuario_clientes
-           WHERE usuario_id = ? AND cliente_id = ?""",
+           WHERE usuario_id = ? AND cliente_id = ? AND COALESCE(activo,1)=1""",
         (usuario["id"], cliente_id)
     ).fetchone()
     return bool(fila)
@@ -1002,7 +1002,7 @@ def _puede_acceder_cliente(conn, usuario, cliente_id):
 def listar_clientes():
     usuario = obtener_usuario_por_token()
     conn = get_db()
-    if usuario["rol"] in ("superadmin", "admin"):
+    if str(usuario["rol"]).lower() == "superadmin":
         filas = conn.execute(
             "SELECT * FROM clientes WHERE estado = 'activo' ORDER BY razon_social"
         ).fetchall()
@@ -1010,7 +1010,7 @@ def listar_clientes():
         filas = conn.execute(
             """SELECT c.* FROM clientes c
                INNER JOIN usuario_clientes uc ON uc.cliente_id = c.id
-               WHERE uc.usuario_id = ? AND c.estado = 'activo'
+               WHERE uc.usuario_id = ? AND COALESCE(uc.activo,1)=1 AND c.estado = 'activo'
                ORDER BY c.razon_social""",
             (usuario["id"],)
         ).fetchall()
