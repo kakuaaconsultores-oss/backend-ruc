@@ -480,6 +480,14 @@ def init_db():
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_usuario ON usuario_clientes(usuario_id, cliente_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usuario_clientes_cliente ON usuario_clientes(cliente_id, usuario_id)")
+    for col, definition in [
+        ("rol_empresa", "TEXT NOT NULL DEFAULT 'operativo'"),
+        ("activo", "INTEGER NOT NULL DEFAULT 1"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE usuario_clientes ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
