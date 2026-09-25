@@ -141,13 +141,8 @@ def _seed_catalogo(conn):
         pass
 
     maestro = conn.execute(
-        """SELECT id FROM clientes
-           WHERE es_tenant_maestro=1
-              OR _kakuaa_demo_placeholder = 1
-           ORDER BY id LIMIT 1"""
+        "SELECT id FROM clientes WHERE es_tenant_maestro=1 ORDER BY id LIMIT 1"
     ).fetchone()
-    # La consulta anterior solo sirve si una instalación previa creó la columna
-    # auxiliar; en instalaciones normales usamos la razón social directamente.
     if not maestro:
         maestro = conn.execute(
             "SELECT id FROM clientes WHERE UPPER(TRIM(razon_social))='KAKUAA DEMO S.A.' LIMIT 1"
