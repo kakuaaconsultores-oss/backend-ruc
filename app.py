@@ -180,7 +180,7 @@ CORS_ORIGINS.extend(
     o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",")
     if o.strip() and o.strip() not in CORS_ORIGINS
 )
-CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}}, supports_credentials=True, expose_headers=["Content-Disposition"])
+CORS(app, resources={r"/api/.*": {"origins": CORS_ORIGINS}}, supports_credentials=True, expose_headers=["Content-Disposition"])
 
 # Configuración SMTP (se lee de variables de entorno de Render)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
