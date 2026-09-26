@@ -191,12 +191,17 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             ]
             for cliente in clientes:
                 cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
-                for codigo_um, nombre_um, abreviatura_um in unidades_base:
-                    conn.execute(
-                        "INSERT INTO unidades_medida(cliente_id,codigo,nombre,abreviatura,activo) VALUES(?,?,?,?,1) "
-                        "ON CONFLICT (cliente_id,codigo) DO NOTHING",
-                        (cliente_id,codigo_um,nombre_um,abreviatura_um)
-                    )
+                tiene_unidades = conn.execute(
+                    "SELECT 1 FROM unidades_medida WHERE cliente_id=? LIMIT 1",
+                    (cliente_id,)
+                ).fetchone()
+                if not tiene_unidades:
+                    for codigo_um, nombre_um, abreviatura_um in unidades_base:
+                        conn.execute(
+                            "INSERT INTO unidades_medida(cliente_id,codigo,nombre,abreviatura,activo) VALUES(?,?,?,?,1) "
+                            "ON CONFLICT (cliente_id,codigo) DO NOTHING",
+                            (cliente_id,codigo_um,nombre_um,abreviatura_um)
+                        )
                 # Migración de conceptos existentes: conservamos unidad_medida
                 # para compatibilidad y asignamos una unidad maestra.
                 conceptos_legacy = conn.execute(
