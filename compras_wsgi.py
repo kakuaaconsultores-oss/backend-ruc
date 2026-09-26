@@ -1,4 +1,7 @@
 from app import app, get_db, staff_required, usuario_required, admin_required, obtener_usuario_por_token, insertar_y_obtener_id
+from erp_modulos import register as register_erp
+register_erp(app, get_db, staff_required, usuario_required, admin_required)
+
 from compras import register
 register(app, get_db, staff_required, usuario_required, insertar_y_obtener_id)
 
