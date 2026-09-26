@@ -66,6 +66,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
             for table, column, definition in (
+                ("conceptos_compra", "unidad_medida_id", "INTEGER"),
                 ("condiciones_compra", "tipo", "TEXT NOT NULL DEFAULT 'dias'"),
                 ("condiciones_compra", "cuotas", "INTEGER NOT NULL DEFAULT 1"),
                 ("formas_pago_compra", "cuenta_contable_id", "INTEGER"),
@@ -93,10 +94,18 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_proveedor_timbrados ON proveedor_timbrados(cliente_id, proveedor_id, activo)")
 
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS unidades_medida (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
+                nombre TEXT NOT NULL, abreviatura TEXT DEFAULT '', activo INTEGER NOT NULL DEFAULT 1,
+                creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(cliente_id,codigo))""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_unidades_medida_cliente ON unidades_medida(cliente_id, activo, codigo)")
+
             conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, descripcion TEXT DEFAULT '', tipo TEXT DEFAULT 'servicio',
-                unidad_medida TEXT NOT NULL DEFAULT '', stock_minimo REAL NOT NULL DEFAULT 0,
+                unidad_medida TEXT NOT NULL DEFAULT '', unidad_medida_id INTEGER DEFAULT NULL,
+                stock_minimo REAL NOT NULL DEFAULT 0,
                 cuenta_contable_id INTEGER DEFAULT NULL, concepto_presupuestario TEXT DEFAULT NULL,
                 tasa_iva REAL DEFAULT 10, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
@@ -160,6 +169,67 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 forma_pago_id INTEGER, estado TEXT NOT NULL DEFAULT 'activo', observacion TEXT DEFAULT '',
                 creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             clientes = conn.execute("SELECT id FROM clientes").fetchall()
+            unidades_base = [
+                ("UNI","Unidad","UNI"),
+                ("KG","Kilogramo","kg"),
+                ("G","Gramo","g"),
+                ("MG","Miligramo","mg"),
+                ("LT","Litro","L"),
+                ("ML","Mililitro","ml"),
+                ("MT","Metro","m"),
+                ("CM","Centímetro","cm"),
+                ("M2","Metro cuadrado","m²"),
+                ("M3","Metro cúbico","m³"),
+                ("TN","Tonelada","t"),
+                ("HS","Hora","h"),
+                ("MIN","Minuto","min"),
+                ("DIA","Día","día"),
+                ("MES","Mes","mes"),
+                ("SERV","Servicio","SERV"),
+                ("CAJ","Caja","CAJ"),
+                ("PAQ","Paquete","PAQ"),
+            ]
+            for cliente in clientes:
+                cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
+                for codigo_um, nombre_um, abreviatura_um in unidades_base:
+                    conn.execute(
+                        "INSERT INTO unidades_medida(cliente_id,codigo,nombre,abreviatura,activo) VALUES(?,?,?,?,1) "
+                        "ON CONFLICT (cliente_id,codigo) DO NOTHING",
+                        (cliente_id,codigo_um,nombre_um,abreviatura_um)
+                    )
+                # Migración de conceptos existentes: conservamos unidad_medida
+                # para compatibilidad y asignamos una unidad maestra.
+                conceptos_legacy = conn.execute(
+                    "SELECT id, unidad_medida FROM conceptos_compra "
+                    "WHERE cliente_id=? AND (unidad_medida_id IS NULL OR unidad_medida_id=0)",
+                    (cliente_id,)
+                ).fetchall()
+                for concepto in conceptos_legacy:
+                    texto_um = str(concepto["unidad_medida"] or "").strip()
+                    if not texto_um:
+                        continue
+                    unidad = conn.execute(
+                        "SELECT id,nombre FROM unidades_medida WHERE cliente_id=? "
+                        "AND (UPPER(codigo)=UPPER(?) OR UPPER(nombre)=UPPER(?)) LIMIT 1",
+                        (cliente_id,texto_um,texto_um)
+                    ).fetchone()
+                    if not unidad:
+                        codigo_legacy = "UM" + str(concepto["id"])
+                        conn.execute(
+                            "INSERT INTO unidades_medida(cliente_id,codigo,nombre,abreviatura,activo) VALUES(?,?,?,?,1) "
+                            "ON CONFLICT (cliente_id,codigo) DO NOTHING",
+                            (cliente_id,codigo_legacy,texto_um,texto_um[:10])
+                        )
+                        unidad = conn.execute(
+                            "SELECT id,nombre FROM unidades_medida WHERE cliente_id=? AND codigo=?",
+                            (cliente_id,codigo_legacy)
+                        ).fetchone()
+                    if unidad:
+                        conn.execute(
+                            "UPDATE conceptos_compra SET unidad_medida_id=?, unidad_medida=? "
+                            "WHERE id=? AND cliente_id=?",
+                            (unidad["id"],unidad["nombre"],concepto["id"],cliente_id)
+                        )
             for cliente in clientes:
                 cliente_id = cliente["id"] if hasattr(cliente, "keys") else cliente[0]
                 existe = conn.execute("SELECT 1 FROM tipos_comprobante_compra WHERE cliente_id=? LIMIT 1", (cliente_id,)).fetchone()
@@ -532,6 +602,120 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
     crud_catalogo("/api/compras/tipos-comprobante","tipos_comprobante_compra",["codigo","nombre","activo"])
     crud_catalogo("/api/compras/condiciones","condiciones_compra",["codigo","nombre","tipo","dias_credito","cuotas"])
     crud_catalogo("/api/compras/formas-pago","formas_pago_compra",["codigo","nombre","tipo","cuenta_contable_id"])
+    @app.get("/api/compras/unidades-medida")
+    @usuario_required
+    def listar_unidades_medida():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute(
+                "SELECT * FROM unidades_medida WHERE cliente_id=? ORDER BY activo DESC,nombre,codigo",
+                (cid,)
+            ).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:
+            conn.close()
+
+    @app.post("/api/compras/unidades-medida")
+    @staff_required
+    def crear_unidad_medida():
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            codigo=(d.get("codigo") or "").strip().upper()
+            nombre=(d.get("nombre") or "").strip()
+            abreviatura=(d.get("abreviatura") or "").strip()
+            if not codigo:return jsonify({"error":"El código de la unidad de medida es obligatorio."}),400
+            if len(codigo)>10:return jsonify({"error":"El código no puede superar 10 caracteres."}),400
+            if not nombre:return jsonify({"error":"El nombre de la unidad de medida es obligatorio."}),400
+            if len(nombre)>80:return jsonify({"error":"El nombre no puede superar 80 caracteres."}),400
+            if not abreviatura: abreviatura=codigo
+            existe=conn.execute(
+                "SELECT id FROM unidades_medida WHERE cliente_id=? AND UPPER(codigo)=UPPER(?) LIMIT 1",
+                (cid,codigo)
+            ).fetchone()
+            if existe:return jsonify({"error":"Ya existe una unidad de medida con ese código."}),409
+            rid=insertar_id(conn,
+                "INSERT INTO unidades_medida(cliente_id,codigo,nombre,abreviatura,activo) VALUES(?,?,?,?,1)",
+                (cid,codigo,nombre,abreviatura)
+            )
+            conn.commit()
+            return jsonify({"ok":True,"id":rid}),201
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:
+            conn.close()
+
+    @app.put("/api/compras/unidades-medida/<int:unidad_id>")
+    @staff_required
+    def editar_unidad_medida(unidad_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute(
+                "SELECT * FROM unidades_medida WHERE id=? AND cliente_id=?",
+                (unidad_id,cid)
+            ).fetchone()
+            if not row:return jsonify({"error":"Unidad de medida no encontrada."}),404
+            codigo=(d.get("codigo") if "codigo" in d else row["codigo"] or "").strip().upper()
+            nombre=(d.get("nombre") if "nombre" in d else row["nombre"] or "").strip()
+            abreviatura=(d.get("abreviatura") if "abreviatura" in d else row["abreviatura"] or "").strip()
+            if not codigo:return jsonify({"error":"El código de la unidad de medida es obligatorio."}),400
+            if len(codigo)>10:return jsonify({"error":"El código no puede superar 10 caracteres."}),400
+            if not nombre:return jsonify({"error":"El nombre de la unidad de medida es obligatorio."}),400
+            if not abreviatura:abreviatura=codigo
+            activo=1 if str(d.get("estado","activo")).lower() in ("activo","1","true","on") else 0
+            existe=conn.execute(
+                "SELECT id FROM unidades_medida WHERE cliente_id=? AND UPPER(codigo)=UPPER(?) AND id<>? LIMIT 1",
+                (cid,codigo,unidad_id)
+            ).fetchone()
+            if existe:return jsonify({"error":"Ya existe otra unidad de medida con ese código."}),409
+            conn.execute(
+                "UPDATE unidades_medida SET codigo=?,nombre=?,abreviatura=?,activo=?,actualizado_en=CAST(CURRENT_TIMESTAMP AS TEXT) "
+                "WHERE id=? AND cliente_id=?",
+                (codigo,nombre,abreviatura,activo,unidad_id,cid)
+            )
+            # Mantener el texto legado sincronizado para los conceptos asociados.
+            conn.execute(
+                "UPDATE conceptos_compra SET unidad_medida=? WHERE unidad_medida_id=? AND cliente_id=?",
+                (nombre,unidad_id,cid)
+            )
+            conn.commit()
+            return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:
+            conn.close()
+
+    @app.delete("/api/compras/unidades-medida/<int:unidad_id>")
+    @staff_required
+    def eliminar_unidad_medida(unidad_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute(
+                "SELECT id FROM unidades_medida WHERE id=? AND cliente_id=?",
+                (unidad_id,cid)
+            ).fetchone()
+            if not row:return jsonify({"error":"Unidad de medida no encontrada."}),404
+            usada=conn.execute(
+                "SELECT id FROM conceptos_compra WHERE unidad_medida_id=? AND cliente_id=? LIMIT 1",
+                (unidad_id,cid)
+            ).fetchone()
+            if usada:
+                return jsonify({"error":"No se puede eliminar esta unidad porque está asociada a uno o más ítems. Podés inactivarla para conservar la trazabilidad."}),409
+            conn.execute("DELETE FROM unidades_medida WHERE id=? AND cliente_id=?",(unidad_id,cid))
+            conn.commit()
+            return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:
+            conn.close()
+
     @app.get("/api/compras/conceptos/disponibles")
     @usuario_required
     def listar_conceptos_compra_disponibles():
@@ -557,17 +741,39 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
             descripcion=(d.get("descripcion") or d.get("nombre") or "").strip()
-            unidad=(d.get("unidad_medida") or "").strip()
+            unidad_id=d.get("unidad_medida_id")
+            unidad=""
+            if unidad_id not in (None,"","null"):
+                try: unidad_id=int(unidad_id)
+                except (TypeError,ValueError): return jsonify({"error":"Unidad de medida inválida."}),400
+                unidad_row=conn.execute(
+                    "SELECT id,nombre,activo FROM unidades_medida WHERE id=? AND cliente_id=?",
+                    (unidad_id,cid)
+                ).fetchone()
+                if not unidad_row:return jsonify({"error":"La unidad de medida no existe para este cliente."}),400
+                if int(unidad_row["activo"])==0:return jsonify({"error":"La unidad de medida seleccionada está inactiva."}),400
+                unidad=unidad_row["nombre"]
+            else:
+                # Compatibilidad con clientes que todavía envíen el texto antiguo.
+                unidad_texto=(d.get("unidad_medida") or "").strip()
+                if unidad_texto:
+                    unidad_row=conn.execute(
+                        "SELECT id,nombre FROM unidades_medida WHERE cliente_id=? AND activo=1 "
+                        "AND (UPPER(codigo)=UPPER(?) OR UPPER(nombre)=UPPER(?)) LIMIT 1",
+                        (cid,unidad_texto,unidad_texto)
+                    ).fetchone()
+                    if unidad_row:
+                        unidad_id=unidad_row["id"];unidad=unidad_row["nombre"]
             if not descripcion:return jsonify({"error":"La descripción es obligatoria."}),400
-            if not unidad:return jsonify({"error":"La unidad de medida es obligatoria."}),400
+            if unidad_id in (None,"","null") or not unidad:return jsonify({"error":"Seleccioná una unidad de medida válida."}),400
             try: stock=float(d.get("stock_minimo") or 0)
             except (TypeError,ValueError): return jsonify({"error":"El stock mínimo debe ser numérico."}),400
             if stock<0:return jsonify({"error":"El stock mínimo no puede ser negativo."}),400
             try: iva=float(d.get("tasa_iva"))
             except (TypeError,ValueError): return jsonify({"error":"El tipo IVA es obligatorio."}),400
             if iva not in (0,5,10):return jsonify({"error":"El tipo IVA debe ser 0%, 5% o 10%."}),400
-            rid=insertar_id(conn,"INSERT INTO conceptos_compra(cliente_id,codigo,nombre,descripcion,tipo,unidad_medida,stock_minimo,cuenta_contable_id,concepto_presupuestario,tasa_iva,activo) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (cid,"0",descripcion,descripcion,(d.get("tipo") or "bien").strip(),unidad,stock,None,None,iva,1))
+            rid=insertar_id(conn,"INSERT INTO conceptos_compra(cliente_id,codigo,nombre,descripcion,tipo,unidad_medida,unidad_medida_id,stock_minimo,cuenta_contable_id,concepto_presupuestario,tasa_iva,activo) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cid,"0",descripcion,descripcion,(d.get("tipo") or "bien").strip(),unidad,int(unidad_id),stock,None,None,iva,1))
             codigo=str(rid)
             conn.execute("UPDATE conceptos_compra SET codigo=? WHERE id=? AND cliente_id=?",(codigo,rid,cid))
             conn.commit();return jsonify({"ok":True,"id":rid,"codigo":codigo}),201
@@ -585,9 +791,19 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             row=conn.execute("SELECT * FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
             if not row:return jsonify({"error":"Ítem no encontrado."}),404
             descripcion=(d.get("descripcion") or "").strip()
-            unidad=(d.get("unidad_medida") or "").strip()
+            unidad_id=d.get("unidad_medida_id")
+            if unidad_id in (None,"","null"):
+                unidad_id=row["unidad_medida_id"]
+            try: unidad_id=int(unidad_id)
+            except (TypeError,ValueError): return jsonify({"error":"Unidad de medida inválida."}),400
+            unidad_row=conn.execute(
+                "SELECT id,nombre,activo FROM unidades_medida WHERE id=? AND cliente_id=?",
+                (unidad_id,cid)
+            ).fetchone()
+            if not unidad_row:return jsonify({"error":"La unidad de medida no existe para este cliente."}),400
+            if int(unidad_row["activo"])==0:return jsonify({"error":"La unidad de medida seleccionada está inactiva."}),400
+            unidad=unidad_row["nombre"]
             if not descripcion:return jsonify({"error":"La descripción es obligatoria."}),400
-            if not unidad:return jsonify({"error":"La unidad de medida es obligatoria."}),400
             try: stock=float(d.get("stock_minimo") or 0)
             except (TypeError,ValueError):return jsonify({"error":"El stock mínimo debe ser numérico."}),400
             if stock<0:return jsonify({"error":"El stock mínimo no puede ser negativo."}),400
@@ -595,8 +811,24 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             except (TypeError,ValueError):return jsonify({"error":"El tipo IVA es obligatorio."}),400
             if iva not in (0,5,10):return jsonify({"error":"El tipo IVA debe ser 0%, 5% o 10%."}),400
             activo=1 if str(d.get("estado","activo")).lower() in ("activo","1","true","on") else 0
-            conn.execute("UPDATE conceptos_compra SET nombre=?,descripcion=?,unidad_medida=?,stock_minimo=?,tasa_iva=?,activo=? WHERE id=? AND cliente_id=?",
-                (descripcion,descripcion,unidad,stock,iva,activo,item_id,cid))
+            conn.execute("UPDATE conceptos_compra SET nombre=?,descripcion=?,unidad_medida=?,unidad_medida_id=?,stock_minimo=?,tasa_iva=?,activo=? WHERE id=? AND cliente_id=?",
+                (descripcion,descripcion,unidad,int(unidad_id),stock,iva,activo,item_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.post("/api/compras/conceptos/<int:item_id>/estado")
+    @staff_required
+    def cambiar_estado_concepto_compra(item_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT id FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Ítem no encontrado."}),404
+            activo=1 if bool(d.get("activo")) else 0
+            conn.execute("UPDATE conceptos_compra SET activo=? WHERE id=? AND cliente_id=?",(activo,item_id,cid))
             conn.commit();return jsonify({"ok":True})
         except Exception as e:
             conn.rollback();return jsonify({"error":str(e)}),400
@@ -609,8 +841,21 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            conn.execute("UPDATE conceptos_compra SET activo=0 WHERE id=? AND cliente_id=?",(item_id,cid))
+            row=conn.execute("SELECT id FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Ítem no encontrado."}),404
+            usado=conn.execute(
+                "SELECT 1 FROM ordenes_compra_detalle WHERE concepto_id=? LIMIT 1",
+                (item_id,)
+            ).fetchone() or conn.execute(
+                "SELECT 1 FROM comprobantes_compra_detalle WHERE concepto_id=? LIMIT 1",
+                (item_id,)
+            ).fetchone()
+            if usado:
+                return jsonify({"error":"No se puede eliminar este ítem porque ya fue utilizado en una operación. Podés inactivarlo para conservar la trazabilidad."}),409
+            conn.execute("DELETE FROM conceptos_compra WHERE id=? AND cliente_id=?",(item_id,cid))
             conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
     @app.put("/api/contabilidad/cuentas-articulos/<int:item_id>")
