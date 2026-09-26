@@ -133,12 +133,22 @@ def _seed_catalogo(conn):
 
     # KAKUAA DEMO S.A. es el tenant maestro actual. No dependemos de un RUC
     # fijo: lo identificamos por razón social normalizada.
-    try:
+    if os.environ.get("DATABASE_URL"):
+        # PostgreSQL: IF NOT EXISTS evita abortar la transacción si la columna
+        # ya fue creada en un despliegue anterior.
         conn.execute(
-            "ALTER TABLE clientes ADD COLUMN es_tenant_maestro INTEGER NOT NULL DEFAULT 0"
+            "ALTER TABLE clientes ADD COLUMN IF NOT EXISTS es_tenant_maestro INTEGER NOT NULL DEFAULT 0"
         )
-    except Exception:
-        pass
+    else:
+        try:
+            conn.execute(
+                "ALTER TABLE clientes ADD COLUMN es_tenant_maestro INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            # SQLite no dispone de ADD COLUMN IF NOT EXISTS de forma portable.
+            # Si la columna ya existe, continuamos sin dejar una transacción
+            # abortada.
+            conn.rollback()
 
     maestro = conn.execute(
         "SELECT id FROM clientes WHERE es_tenant_maestro=1 ORDER BY id LIMIT 1"
