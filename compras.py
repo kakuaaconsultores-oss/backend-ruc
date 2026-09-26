@@ -4,6 +4,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from flask import request, jsonify
+from erp_modulos import registrar_ingreso_compra
 
 TIPOS_COMPROBANTE_DEFAULT = [
     ("FACTURA", "Factura", 1),
@@ -1078,8 +1079,15 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                         return jsonify({"error":"El ítem seleccionado todavía no está habilitado por Contabilidad."}),400
                     iva_tasa=float(concepto["tasa_iva"] or 0)
                     cuenta_detalle=concepto["cuenta_contable_id"]
+                cantidad_item=float(item.get("cantidad",1) or 1)
+                precio_item=float(item.get("precio_unitario",0) or 0)
+                subtotal_item=float(item.get("subtotal",0) or 0)
                 conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id) VALUES(?,?,?,?,?,?,?,?)""",
-                    (cidc,concepto_id,item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),iva_tasa,float(item.get("subtotal",0) or 0),cuenta_detalle))
+                    (cidc,concepto_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle))
+                if concepto_id not in (None,"","null") and d.get("estado","registrado") not in ("borrador","anulado"):
+                    registrar_ingreso_compra(conn,cid,int(cidc),{
+                        "concepto_id":concepto_id,"cantidad":cantidad_item,"precio_unitario":precio_item
+                    },usuario_id=None,fecha=d.get("fecha"))
             conn.commit(); return jsonify({"id":cidc}),201
         except Exception as e:
             conn.rollback(); return jsonify({"error":str(e)}),400

@@ -27,6 +27,7 @@ except ImportError:
     psycopg = None
     dict_row = None
 from flask import Flask, request, jsonify, send_from_directory
+from erp_modulos import stock_suficiente_para_venta, registrar_salida_venta
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -2375,12 +2376,19 @@ def crear_factura_cliente():
     if not _cliente_valido(conn, cliente_id):
         conn.close()
         return jsonify({"error": "Cliente no encontrado."}), 404
+    if articulo_id is not None:
+        error_stock = stock_suficiente_para_venta(conn, cliente_id, articulo_id, cantidad)
+        if error_stock:
+            conn.close()
+            return jsonify({"error": error_stock}), 409
     try:
         factura_id = insertar_y_obtener_id(conn,"""
             INSERT INTO facturas_clientes
             (cliente_id, numero, fecha, concepto, monto, estado, creado_por, articulo_id, tarifa_id, cantidad)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (cliente_id, numero, fecha, concepto, monto, estado, obtener_usuario_por_token()["id"], articulo_id, tarifa_id, cantidad))
+        if articulo_id is not None:
+            registrar_salida_venta(conn, cliente_id, articulo_id, cantidad, factura_id, obtener_usuario_por_token()["id"], fecha)
         conn.commit()
     except DB_INTEGRITY_ERROR:
         conn.rollback()
