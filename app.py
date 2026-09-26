@@ -2817,10 +2817,17 @@ def _validar_cuenta_contable(data, conn, cliente_id, cuenta_id=None):
         if tipo_impuesto_cliente not in CLIENTE_IMPUESTOS_VALIDOS:
             return "El cliente seleccionado todavía no tiene un tipo de impuesto definido."
         formulario_esperado = formulario_por_impuesto(tipo_impuesto_cliente) or "NO_APLICA"
-    if cliente_id is None and formulario_esperado not in {"NO_APLICA", "500", "501"}:
-        return "En el Catálogo maestro de Kakuaa solo se permiten NO_APLICA, Formulario 500 o Formulario 501."
-    if formulario_impuesto != formulario_esperado:
-        return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
+
+    # Una cuenta puede no participar directamente de una declaración fiscal.
+    # Por eso NO_APLICA es válido en cualquier contexto. Si se informa un
+    # formulario, debe ser compatible con el impuesto del cliente.
+    if cliente_id is None:
+        if formulario_impuesto not in {"NO_APLICA", "500", "501"}:
+            return "En el Catálogo maestro de Kakuaa solo se permiten NO_APLICA, Formulario 500 o Formulario 501."
+    else:
+        formularios_validos_cliente = {"NO_APLICA", formulario_esperado}
+        if formulario_impuesto not in formularios_validos_cliente:
+            return f"El formulario debe corresponder al tipo de impuesto del contexto: {formulario_esperado}."
     if formulario_esperado in {"500", "501"}:
         if not inciso_formulario:
             return "La referencia/casilla DNIT es obligatoria cuando se selecciona el Formulario 500 o 501."
@@ -3092,15 +3099,30 @@ def anular_asiento_contable(asiento_id):
 @app.route("/api/contabilidad/cuentas/plantilla", methods=["GET"])
 @admin_required
 def descargar_plantilla_cuentas():
+    cliente_id, error_ctx = obtener_contexto_cuenta()
+    if error_ctx:
+        return error_ctx
+
+    formulario_contexto = "NO_APLICA"
+    if cliente_id is not None:
+        conn_ctx = get_db()
+        fila_cliente = conn_ctx.execute("SELECT tipo_impuesto FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+        conn_ctx.close()
+        if not fila_cliente:
+            return jsonify({"error":"El cliente seleccionado no existe."}),404
+        tipo_impuesto = str(fila_cliente["tipo_impuesto"] or "").strip().upper()
+        formulario_contexto = formulario_por_impuesto(tipo_impuesto) or "NO_APLICA"
+
     wb=Workbook()
     ws=wb.active; ws.title="Plan de Cuentas"
     headers=["CODIGO","NOMBRE","TIPO","NATURALEZA","NIVEL","CUENTA_PADRE_CODIGO","IMPUTABLE","CONCEPTO_FLUJO_EFECTIVO","FORMULARIO_IMPUESTO","INCISO_FORMULARIO"]
     ws.append(headers)
+    inciso_ejemplo = "10" if formulario_contexto in {"500","501"} else ""
     ejemplos=[
         ["1","ACTIVO","activo","deudora",1,"","NO","1.05","NO_APLICA",""],
         ["1.01","ACTIVO CORRIENTE","activo","deudora",2,"1","NO","1.05","NO_APLICA",""],
         ["1.01.01","CAJA","activo","deudora",3,"1.01","SI","1.01","NO_APLICA",""],
-        ["4.01","VENTAS","ingreso","acreedora",2,"4","SI","1.01","500","10"],
+        ["4.01","VENTAS","ingreso","acreedora",2,"4","SI","1.01",formulario_contexto,inciso_ejemplo],
     ]
     for row in ejemplos: ws.append(row)
     for cell in ws[1]:
@@ -3119,8 +3141,8 @@ def descargar_plantilla_cuentas():
         ["CUENTA_PADRE_CODIGO","Código de la cuenta padre. Debe ser no imputable."],
         ["IMPUTABLE","SI o NO. Solo las imputables pueden recibir movimientos."],
         ["CONCEPTO_FLUJO_EFECTIVO","Usá uno de los códigos 1.01 a 3.04 o 4 definidos por Kakuaa."],
-        ["FORMULARIO_IMPUESTO","En cliente IRE se valida automáticamente contra 500/501. En Kakuaa general usar NO_APLICA."],
-        ["INCISO_FORMULARIO","Solo para cuentas imputables IRE 500/501; debe corresponder a una casilla válida."],
+        ["FORMULARIO_IMPUESTO","Puede ser NO_APLICA. Si se informa un formulario, debe corresponder al impuesto del contexto (IVA=120, IRP-RSP=515, IRP-RGC=516, IRE SIMPLE=501, IRE GENERAL=500)."],
+        ["INCISO_FORMULARIO","Solo para cuentas imputables con Formulario 500 o 501; debe corresponder a una casilla válida."],
     ]
     for row in instructions:
         info.append(row);
@@ -3200,9 +3222,14 @@ def importar_cuentas_contables():
             existing_codes.add(r["codigo"])
         conn.commit()
         return jsonify({"ok":True,"importadas":len(rows)})
-    except (ValueError,DB_INTEGRITY_ERROR) as e:
-        conn.rollback(); return jsonify({"error":str(e) or "No se pudo importar el plan de cuentas."}),400
-    finally: conn.close()
+    except ValueError as e:
+        conn.rollback()
+        return jsonify({"error":str(e) or "No se pudo importar el plan de cuentas."}),400
+    except DB_INTEGRITY_ERROR as e:
+        conn.rollback()
+        return jsonify({"error":str(e) or "No se pudo importar el plan de cuentas."}),400
+    finally:
+        conn.close()
 
 # ==================== REPORTES CONTABLES ====================
 
