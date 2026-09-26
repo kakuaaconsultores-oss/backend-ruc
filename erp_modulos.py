@@ -178,6 +178,8 @@ def registrar_ingreso_compra(conn, cliente_id, comprobante_id, detalle, usuario_
     fecha=fecha or datetime.utcnow().strftime("%Y-%m-%d")
     concepto_id=detalle.get("concepto_id")
     if not concepto_id:return
+    if conn.execute("SELECT 1 FROM inventario_movimientos WHERE referencia_tipo='COMPROBANTE_COMPRA' AND referencia_id=? AND item_id IN (SELECT id FROM inventario_items WHERE concepto_compra_id=?) LIMIT 1",(comprobante_id,int(concepto_id))).fetchone():
+        return
     item=_find_inventory_item(conn,cliente_id,concepto_id=int(concepto_id))
     if not item:
         concepto=conn.execute("SELECT * FROM conceptos_compra WHERE id=? AND cliente_id=? AND activo=1",(int(concepto_id),cliente_id)).fetchone()
