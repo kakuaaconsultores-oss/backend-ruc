@@ -72,6 +72,7 @@ def init_erp(get_db):
         for col, definition in (
             ("precio_base", "REAL NOT NULL DEFAULT 0"),
             ("tipo_iva", "REAL NOT NULL DEFAULT 10"),
+            ("concepto_presupuestario_id", "INTEGER DEFAULT NULL"),
             ("concepto_presupuestario_ingreso", "TEXT DEFAULT NULL"),
             ("concepto_presupuestario_egreso", "TEXT DEFAULT NULL"),
             ("cuenta_debe_compra_id", "INTEGER DEFAULT NULL"),
@@ -81,6 +82,12 @@ def init_erp(get_db):
         ):
             if not _column_exists("inventario_items", col):
                 conn.execute(f"ALTER TABLE inventario_items ADD COLUMN {col} {definition}")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS conceptos_presupuestarios(
+            id {idc} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL, nombre TEXT NOT NULL,
+            tipo TEXT NOT NULL DEFAULT 'EGRESO', activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cliente_id,codigo))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_conceptos_presup_cliente ON conceptos_presupuestarios(cliente_id,activo,codigo)")
         conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_stock(
             id {idc} PRIMARY KEY, item_id INTEGER NOT NULL, deposito_id INTEGER NOT NULL,
             existencia REAL NOT NULL DEFAULT 0, reservado REAL NOT NULL DEFAULT 0,
@@ -283,17 +290,19 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             if err:return jsonify({"error":err}),401
             rows=conn.execute("""SELECT i.*,COALESCE(SUM(s.existencia),0) existencia,COALESCE(SUM(s.reservado),0) reservado,
                 um.codigo unidad_codigo,um.nombre unidad_nombre,um.abreviatura unidad_abreviatura,
-                cc.nombre concepto_compra_nombre,a.nombre articulo_venta_nombre
+                cc.nombre concepto_compra_nombre,a.nombre articulo_venta_nombre,
+                cp.codigo concepto_presupuestario_codigo,cp.nombre concepto_presupuestario_nombre,cp.tipo concepto_presupuestario_tipo
                 FROM inventario_items i LEFT JOIN inventario_stock s ON s.item_id=i.id
                 LEFT JOIN unidades_medida um ON um.id=i.unidad_medida_id
                 LEFT JOIN conceptos_compra cc ON cc.id=i.concepto_compra_id
                 LEFT JOIN articulos a ON a.id=i.articulo_venta_id
-                WHERE i.cliente_id=? GROUP BY i.id,um.codigo,um.nombre,um.abreviatura,cc.nombre,a.nombre
+                LEFT JOIN conceptos_presupuestarios cp ON cp.id=i.concepto_presupuestario_id AND cp.cliente_id=i.cliente_id
+                WHERE i.cliente_id=? GROUP BY i.id,um.codigo,um.nombre,um.abreviatura,cc.nombre,a.nombre,cp.codigo,cp.nombre,cp.tipo
                 ORDER BY i.activo DESC,i.codigo""",(cid,)).fetchall()
             data=[]
             for x in rows:
                 d=dict(x);d["disponible"]=float(d.get("existencia") or 0)-float(d.get("reservado") or 0)
-                d["contabilidad_configurada"]=all(d.get(k) is not None for k in ("cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id"))
+                d["contabilidad_configurada"]=all(d.get(k) is not None for k in ("concepto_presupuestario_id","cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id"))
                 data.append(d)
             return jsonify(data)
         finally:conn.close()
@@ -353,6 +362,71 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
+    @app.get("/api/finanzas/conceptos-presupuestarios")
+    @usuario_required
+    def fin_conceptos_presupuestarios():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT id,codigo,nombre,tipo,activo,creado_en,actualizado_en
+                FROM conceptos_presupuestarios WHERE cliente_id=? ORDER BY activo DESC,tipo,codigo""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
+
+    @app.post("/api/finanzas/conceptos-presupuestarios")
+    @admin_required
+    def fin_crear_concepto_presupuestario():
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            codigo=str(d.get("codigo","")).strip().upper()
+            nombre=str(d.get("nombre","")).strip()
+            tipo=str(d.get("tipo","EGRESO")).strip().upper()
+            if not codigo or not nombre:return jsonify({"error":"Código y descripción son obligatorios."}),400
+            if tipo not in ("INGRESO","EGRESO"):return jsonify({"error":"El tipo debe ser INGRESO o EGRESO."}),400
+            if conn.execute("SELECT 1 FROM conceptos_presupuestarios WHERE cliente_id=? AND codigo=?",(cid,codigo)).fetchone():
+                return jsonify({"error":"Ya existe un concepto presupuestario con ese código."}),409
+            concepto_id=_insert_id(conn,"""INSERT INTO conceptos_presupuestarios(cliente_id,codigo,nombre,tipo,activo)
+                VALUES(?,?,?,?,1)""",(cid,codigo,nombre,tipo))
+            conn.commit();return jsonify({"ok":True,"id":concepto_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.patch("/api/finanzas/conceptos-presupuestarios/<int:concepto_id>")
+    @admin_required
+    def fin_actualizar_concepto_presupuestario(concepto_id):
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM conceptos_presupuestarios WHERE id=? AND cliente_id=?",(concepto_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Concepto presupuestario no encontrado."}),404
+            fields=[];vals=[]
+            if "codigo" in d:
+                codigo=str(d.get("codigo","")).strip().upper()
+                if not codigo:return jsonify({"error":"El código es obligatorio."}),400
+                if conn.execute("SELECT 1 FROM conceptos_presupuestarios WHERE cliente_id=? AND codigo=? AND id<>?",(cid,codigo,concepto_id)).fetchone():
+                    return jsonify({"error":"Ya existe otro concepto con ese código."}),409
+                fields.append("codigo=?");vals.append(codigo)
+            if "nombre" in d:
+                nombre=str(d.get("nombre","")).strip()
+                if not nombre:return jsonify({"error":"La descripción es obligatoria."}),400
+                fields.append("nombre=?");vals.append(nombre)
+            if "tipo" in d:
+                tipo=str(d.get("tipo","")).strip().upper()
+                if tipo not in ("INGRESO","EGRESO"):return jsonify({"error":"El tipo debe ser INGRESO o EGRESO."}),400
+                fields.append("tipo=?");vals.append(tipo)
+            if "activo" in d:
+                fields.append("activo=?");vals.append(1 if d["activo"] else 0)
+            if not fields:return jsonify({"ok":True})
+            vals += [concepto_id,cid]
+            conn.execute("UPDATE conceptos_presupuestarios SET "+",".join(fields)+",actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",vals)
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
     @app.patch("/api/inventarios/items/<int:item_id>/contabilidad")
     @staff_required
     def inv_accounting(item_id):
@@ -362,10 +436,16 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             if err:return jsonify({"error":err}),401
             row=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
             if not row:return jsonify({"error":"Artículo no encontrado."}),404
-            keys=("concepto_presupuestario_ingreso","concepto_presupuestario_egreso","cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id")
-            vals=[d.get(k) if k.startswith("concepto_") else (d.get(k) or None) for k in keys]
-            conn.execute("UPDATE inventario_items SET concepto_presupuestario_ingreso=?,concepto_presupuestario_egreso=?,cuenta_debe_compra_id=?,cuenta_debe_devolucion_venta_id=?,cuenta_haber_venta_id=?,cuenta_haber_devolucion_compra_id=?,cuenta_inventario_id=COALESCE(cuenta_inventario_id,?),cuenta_venta_id=COALESCE(cuenta_venta_id,?) WHERE id=? AND cliente_id=?",(*vals,d.get("cuenta_debe_compra_id") or None,d.get("cuenta_haber_venta_id") or None,item_id,cid))
-            if row["concepto_compra_id"]:conn.execute("UPDATE conceptos_compra SET concepto_presupuestario=?,cuenta_contable_id=?,activo=1 WHERE id=? AND cliente_id=?",(d.get("concepto_presupuestario_egreso") or d.get("concepto_presupuestario_ingreso"),d.get("cuenta_debe_compra_id"),row["concepto_compra_id"],cid))
+            keys=("concepto_presupuestario_id","cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id")
+            concepto_id=d.get("concepto_presupuestario_id") or None
+            if concepto_id and not conn.execute("SELECT 1 FROM conceptos_presupuestarios WHERE id=? AND cliente_id=? AND activo=1 AND tipo='EGRESO'",(concepto_id,cid)).fetchone():
+                return jsonify({"error":"El concepto presupuestario debe existir, estar activo y ser de tipo Egreso."}),400
+            vals=[concepto_id]+[(d.get(k) or None) for k in keys[1:]]
+            concepto_nombre=None
+            if concepto_id:
+                cp=conn.execute("SELECT nombre FROM conceptos_presupuestarios WHERE id=? AND cliente_id=?",(concepto_id,cid)).fetchone();concepto_nombre=cp["nombre"] if cp else None
+            conn.execute("UPDATE inventario_items SET concepto_presupuestario_id=?,concepto_presupuestario_ingreso=NULL,concepto_presupuestario_egreso=?,cuenta_debe_compra_id=?,cuenta_debe_devolucion_venta_id=?,cuenta_haber_venta_id=?,cuenta_haber_devolucion_compra_id=?,cuenta_inventario_id=COALESCE(cuenta_inventario_id,?),cuenta_venta_id=COALESCE(cuenta_venta_id,?) WHERE id=? AND cliente_id=?",(*vals,concepto_nombre,d.get("cuenta_debe_compra_id") or None,d.get("cuenta_haber_venta_id") or None,item_id,cid))
+            if row["concepto_compra_id"]:conn.execute("UPDATE conceptos_compra SET concepto_presupuestario=?,cuenta_contable_id=?,activo=1 WHERE id=? AND cliente_id=?",(concepto_nombre,d.get("cuenta_debe_compra_id"),row["concepto_compra_id"],cid))
             conn.commit();return jsonify({"ok":True,"contabilidad_configurada":all(v not in (None,"") for v in vals)})
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
