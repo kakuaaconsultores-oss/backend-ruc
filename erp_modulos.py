@@ -91,6 +91,21 @@ def init_erp(get_db):
             referencia_tipo TEXT DEFAULT NULL, referencia_id INTEGER DEFAULT NULL, observacion TEXT DEFAULT '',
             creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inv_mov_item ON inventario_movimientos(cliente_id,item_id,fecha,id)")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_conteos(
+            id {idc} PRIMARY KEY, cliente_id INTEGER NOT NULL, deposito_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL, estado TEXT NOT NULL DEFAULT 'borrador', observacion TEXT DEFAULT '',
+            creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_conteo_detalles(
+            id {idc} PRIMARY KEY, conteo_id INTEGER NOT NULL, item_id INTEGER NOT NULL,
+            stock_sistema REAL NOT NULL DEFAULT 0, stock_fisico REAL NOT NULL DEFAULT 0,
+            diferencia REAL NOT NULL DEFAULT 0, costo_unitario REAL NOT NULL DEFAULT 0,
+            observacion TEXT DEFAULT '', UNIQUE(conteo_id,item_id))""")
+        for col, definition in (
+            ("metodo_costeo", "TEXT NOT NULL DEFAULT 'PPP'"),
+        ):
+            if not _column_exists("inventario_items", col):
+                conn.execute(f"ALTER TABLE inventario_items ADD COLUMN {col} {definition}")
+        conn.execute("UPDATE inventario_items SET metodo_costeo='PPP' WHERE metodo_costeo IS NULL OR metodo_costeo=''")
         conn.execute(f"""CREATE TABLE IF NOT EXISTS activos_fijos(
             id {idc} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL, descripcion TEXT NOT NULL,
             categoria TEXT NOT NULL DEFAULT 'General', fecha_adquisicion TEXT NOT NULL, fecha_inicio_uso TEXT NOT NULL,
@@ -291,7 +306,9 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
                 articulo_id=_insert_id(conn,"INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad")))
             else:
                 articulo_id=articulo["id"];conn.execute("UPDATE articulos SET nombre=?,descripcion=?,unidad=?,activo=1 WHERE id=?",(nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad"),articulo_id))
-            item_id=_insert_id(conn,"INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,precio_base,tipo_iva) VALUES(?,?,?,?,?,?,?,?,?,?)",(cid,codigo,nombre,concepto_id,articulo_id,unidad_id,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),float(d.get("precio_base") or 0),iva))
+            metodo=str(d.get("metodo_costeo","PPP")).upper()
+            if metodo not in ("PEPS","PPP"):return jsonify({"error":"El método de costeo debe ser PEPS o PPP."}),400
+            item_id=_insert_id(conn,"INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,precio_base,tipo_iva,metodo_costeo) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,codigo,nombre,concepto_id,articulo_id,unidad_id,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),float(d.get("precio_base") or 0),iva,metodo))
             conn.commit();return jsonify({"ok":True,"id":item_id,"concepto_id":concepto_id,"articulo_venta_id":articulo_id}),201
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
@@ -306,7 +323,7 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             row=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
             if not row:return jsonify({"error":"Artículo no encontrado."}),404
             fields=[];vals=[]
-            for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","unidad_medida_id","inventariable"):
+            for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","metodo_costeo","unidad_medida_id","inventariable"):
                 if c in d:fields.append(c+"=?");vals.append(d[c])
             if "activo" in d:fields.append("activo=?");vals.append(1 if d["activo"] else 0)
             if not fields:return jsonify({"ok":True})
@@ -334,45 +351,6 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             conn.commit();return jsonify({"ok":True,"contabilidad_configurada":all(v not in (None,"") for v in vals)})
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
-    @app.post("/api/inventarios/movimientos")
-    @staff_required
-    def inv_move():
-        d=request.get_json() or {};conn=get_db()
-        try:
-            cid,err=_cliente_id(conn)
-            if err:return jsonify({"error":err}),401
-            item=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=? AND activo=1",(d.get("item_id"),cid)).fetchone()
-            if not item:return jsonify({"error":"Ítem de inventario inválido."}),400
-            dep=int(d.get("deposito_id") or _get_principal_deposito(conn,cid)); qty=float(d.get("cantidad") or 0)
-            if qty<=0:return jsonify({"error":"La cantidad debe ser mayor a cero."}),400
-            tipo=str(d.get("tipo","AJUSTE_ENTRADA")).upper()
-            signo=1 if tipo in ("AJUSTE_ENTRADA","ENTRADA","DEVOLUCION_COMPRA") else -1
-            row=conn.execute("SELECT existencia FROM inventario_stock WHERE item_id=? AND deposito_id=?",(item["id"],dep)).fetchone()
-            existencia=float(row["existencia"] or 0) if row else 0
-            nueva=existencia+(qty*signo)
-            if nueva < 0:return jsonify({"error":"El movimiento dejaría stock negativo."}),409
-            conn.execute("""INSERT INTO inventario_stock(item_id,deposito_id,existencia,reservado) VALUES(?,?,?,0)
-                ON CONFLICT(item_id,deposito_id) DO UPDATE SET existencia=excluded.existencia,actualizado_en=CURRENT_TIMESTAMP""",(item["id"],dep,nueva))
-            conn.execute("""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,observacion,creado_por)
-                VALUES(?,?,?,?,?,?,?,?,?)""",(cid,item["id"],dep,d.get("fecha") or datetime.utcnow().strftime("%Y-%m-%d"),tipo,qty*signo,float(d.get("costo_unitario") or item["costo_promedio"] or 0),str(d.get("observacion","")), _usuario_id(conn)))
-            conn.commit();return jsonify({"ok":True,"existencia":nueva})
-        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
-        finally:conn.close()
-
-    @app.get("/api/inventarios/movimientos")
-    @usuario_required
-    def inv_movimientos():
-        conn=get_db()
-        try:
-            cid,err=_cliente_id(conn)
-            if err:return jsonify({"error":err}),401
-            rows=conn.execute("""SELECT m.*,i.codigo,i.nombre item_nombre,d.nombre deposito_nombre
-                FROM inventario_movimientos m JOIN inventario_items i ON i.id=m.item_id
-                JOIN depositos_inventario d ON d.id=m.deposito_id WHERE m.cliente_id=?
-                ORDER BY m.fecha DESC,m.id DESC LIMIT 300""",(cid,)).fetchall()
-            return jsonify([dict(x) for x in rows])
-        finally:conn.close()
-
     @app.get("/api/inventarios/depositos")
     @usuario_required
     def inv_depositos():
@@ -380,7 +358,7 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            return jsonify([dict(x) for x in conn.execute("SELECT * FROM depositos_inventario WHERE cliente_id=? ORDER BY nombre",(cid,)).fetchall()])
+            rows=conn.execute("""SELECT d.*,COALESCE(SUM(s.existencia),0) existencia_items FROM depositos_inventario d LEFT JOIN inventario_stock s ON s.deposito_id=d.id WHERE d.cliente_id=? GROUP BY d.id ORDER BY d.activo DESC,d.codigo""",(cid,)).fetchall();return jsonify([dict(x) for x in rows])
         finally:conn.close()
 
     @app.post("/api/inventarios/depositos")
@@ -392,6 +370,90 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             if err:return jsonify({"error":err}),401
             dep_id=_insert_id(conn,"INSERT INTO depositos_inventario(cliente_id,codigo,nombre,ubicacion) VALUES(?,?,?,?)",(cid,str(d.get("codigo","")).strip(),str(d.get("nombre","")).strip(),str(d.get("ubicacion",""))))
             conn.commit();return jsonify({"ok":True,"id":dep_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.patch("/api/inventarios/depositos/<int:deposito_id>")
+    @staff_required
+    def inv_editar_deposito(deposito_id):
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=?",(deposito_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Depósito no encontrado."}),404
+            conn.execute("UPDATE depositos_inventario SET codigo=?,nombre=?,ubicacion=?,activo=? WHERE id=? AND cliente_id=?",
+                (str(d.get("codigo",row["codigo"])).strip().upper(),str(d.get("nombre",row["nombre"])).strip(),str(d.get("ubicacion",row["ubicacion"] or "")),1 if d.get("activo",row["activo"]) else 0,deposito_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.get("/api/inventarios/reporte/<int:deposito_id>/<int:item_id>")
+    @usuario_required
+    def inv_ficha(deposito_id,item_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            item=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            dep=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=?",(deposito_id,cid)).fetchone()
+            if not item or not dep:return jsonify({"error":"Artículo o depósito no encontrado."}),404
+            mov=conn.execute("SELECT fecha,tipo,cantidad,costo_unitario,referencia_tipo,referencia_id,observacion FROM inventario_movimientos WHERE cliente_id=? AND item_id=? AND deposito_id=? ORDER BY fecha,id",(cid,item_id,deposito_id)).fetchall()
+            saldo_q=0;saldo_m=0;out=[];metodo=(item["metodo_costeo"] or "PPP").upper();capas=[]
+            for x in mov:
+                qty=float(x["cantidad"] or 0);unit=float(x["costo_unitario"] or 0)
+                if qty>0:
+                    saldo_q+=qty
+                    if metodo=="PEPS":capas.append([qty,unit])
+                    else:saldo_m+=qty*unit
+                    pu=unit
+                else:
+                    salida=abs(qty);saldo_q-=salida
+                    if metodo=="PEPS":
+                        costo_salida=0;rest=salida
+                        while rest>0 and capas:
+                            q,u=capas[0];take=min(rest,q);costo_salida+=take*u;q-=take;rest-=take
+                            if q<=0:capas.pop(0)
+                            else:capas[0][0]=q
+                        pu=costo_salida/salida if salida else 0;saldo_m=sum(q*u for q,u in capas)
+                    else:
+                        pu=(saldo_m/saldo_q if saldo_q else unit);saldo_m=max(0,saldo_m-salida*pu)
+                pm=saldo_m/saldo_q if saldo_q else 0
+                out.append({"fecha":x["fecha"],"descripcion":x["tipo"],"precio_unitario":unit,"precio_medio":pm,"movimiento_cantidad":qty,"saldo_cantidad":saldo_q,"movimiento_debe":max(qty,0)*unit,"movimiento_haber":abs(min(qty,0))*pu if qty<0 else 0,"saldo_monetario":saldo_m,"referencia_tipo":x["referencia_tipo"],"referencia_id":x["referencia_id"],"observacion":x["observacion"]})
+            return jsonify({"item":dict(item),"deposito":dict(dep),"metodo_costeo":metodo,"movimientos":out})
+        finally:conn.close()
+
+    @app.get("/api/inventarios/control-stock/<int:deposito_id>")
+    @usuario_required
+    def inv_control_stock(deposito_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT i.id,i.codigo,i.nombre,i.metodo_costeo,i.costo_promedio,COALESCE(s.existencia,0) stock_sistema,COALESCE(s.existencia,0) stock_fisico,d.id deposito_id
+                FROM inventario_items i CROSS JOIN depositos_inventario d LEFT JOIN inventario_stock s ON s.item_id=i.id AND s.deposito_id=d.id
+                WHERE i.cliente_id=? AND i.activo=1 AND i.inventariable=1 AND d.id=? ORDER BY i.codigo""",(cid,deposito_id)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
+
+    @app.post("/api/inventarios/ajustes")
+    @staff_required
+    def inv_ajuste():
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            dep=int(d.get("deposito_id"));item=int(d.get("item_id"));fis=float(d.get("stock_fisico",0))
+            row=conn.execute("SELECT COALESCE(existencia,0) existencia FROM inventario_stock WHERE item_id=? AND deposito_id=?",(item,dep)).fetchone()
+            sis=float(row["existencia"] if row else 0);dif=fis-sis
+            if abs(dif)<1e-12:return jsonify({"ok":True,"ajustado":False,"diferencia":0})
+            it=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item,cid)).fetchone()
+            if not it:return jsonify({"error":"Artículo no encontrado."}),404
+            costo=float(it["costo_promedio"] or 0)
+            if row:conn.execute("UPDATE inventario_stock SET existencia=?,actualizado_en=CURRENT_TIMESTAMP WHERE item_id=? AND deposito_id=?",(fis,item,dep))
+            else:conn.execute("INSERT INTO inventario_stock(item_id,deposito_id,existencia,reservado) VALUES(?,?,?,0)",(item,dep,fis))
+            conn.execute("INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,observacion,creado_por) VALUES(?,?,?,?,?,?,?,?,?)",(cid,item,dep,str(d.get("fecha") or datetime.utcnow().strftime("%Y-%m-%d")),"AJUSTE_INVENTARIO",dif,costo,str(d.get("observacion","Ajuste por inventario físico")), _usuario_id(conn)))
+            conn.commit();return jsonify({"ok":True,"ajustado":True,"diferencia":dif})
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
