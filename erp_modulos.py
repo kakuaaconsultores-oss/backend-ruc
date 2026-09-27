@@ -438,7 +438,7 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
                 conn.execute("""INSERT INTO inventario_traslado_detalles(traslado_id,item_id,cantidad,costo_unitario) VALUES(?,?,?,?)""",(tid,item_id,cantidad,costo))
                 conn.execute("UPDATE inventario_stock SET existencia=existencia-?,actualizado_en=CURRENT_TIMESTAMP WHERE item_id=? AND deposito_id=?",(cantidad,item_id,origen))
                 conn.execute("""INSERT INTO inventario_stock(item_id,deposito_id,existencia,reservado) VALUES(?,?,?,0)
-                    ON CONFLICT(item_id,deposito_id) DO UPDATE SET existencia=inventario_stock.existencia+excluded.existencia,actualizado_en=CURRENT_TIMESTAMP""",(item_id,destino,cantidad))
+                    ON CONFLICT(item_id,deposito_id) DO UPDATE SET existencia=existencia+excluded.existencia,actualizado_en=CURRENT_TIMESTAMP""",(item_id,destino,cantidad))
                 conn.execute("""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,referencia_tipo,referencia_id,observacion,creado_por)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(cid,item_id,origen,fecha,"TRASLADO_SALIDA",-cantidad,costo,"TRASLADO",tid,str(d.get("observacion") or ""),_usuario_id(conn)))
                 conn.execute("""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,referencia_tipo,referencia_id,observacion,creado_por)
