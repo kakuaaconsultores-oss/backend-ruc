@@ -133,8 +133,6 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
             if not _column_exists("comprobantes_compra", "centro_costo_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN centro_costo_id INTEGER")
-            if not _column_exists("comprobantes_compra_detalle", "centro_costo_id"):
-                conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN centro_costo_id INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
@@ -142,6 +140,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
                 iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0,
                 cuenta_contable_id INTEGER DEFAULT NULL)""")
+            if not _column_exists("comprobantes_compra_detalle", "centro_costo_id"):
+                conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN centro_costo_id INTEGER")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS cuotas_compras (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
