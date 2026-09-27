@@ -324,7 +324,9 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             if not row:return jsonify({"error":"Artículo no encontrado."}),404
             fields=[];vals=[]
             for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","metodo_costeo","unidad_medida_id","inventariable"):
-                if c in d:fields.append(c+"=?");vals.append(d[c])
+                if c in d:
+                    fields.append(c+"=?")
+                    vals.append(int(bool(d[c])) if c=="inventariable" else d[c])
             if "activo" in d:fields.append("activo=?");vals.append(1 if d["activo"] else 0)
             if not fields:return jsonify({"ok":True})
             vals += [item_id,cid];conn.execute("UPDATE inventario_items SET "+",".join(fields)+",actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",vals)
