@@ -90,6 +90,12 @@ def init_erp(get_db):
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(cliente_id,codigo))""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_conceptos_presup_cliente ON conceptos_presupuestarios(cliente_id,activo,codigo)")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS centros_costos(
+            id {idc} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL, nombre TEXT NOT NULL,
+            centro_padre_id INTEGER DEFAULT NULL, activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cliente_id,codigo))""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_centros_costos_cliente ON centros_costos(cliente_id,activo,codigo)")
         # Compatibilidad: los artículos que ya tenían un concepto único lo conservan como concepto de egreso.
         try:
             conn.execute("""UPDATE inventario_items
@@ -404,6 +410,74 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             concepto_id=_insert_id(conn,"""INSERT INTO conceptos_presupuestarios(cliente_id,codigo,nombre,tipo,activo)
                 VALUES(?,?,?,?,1)""",(cid,codigo,nombre,tipo))
             conn.commit();return jsonify({"ok":True,"id":concepto_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.get("/api/finanzas/centros-costos")
+    @usuario_required
+    def fin_centros_costos():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT id,codigo,nombre,centro_padre_id,activo,creado_en,actualizado_en
+                FROM centros_costos WHERE cliente_id=? ORDER BY activo DESC,codigo""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
+
+    @app.post("/api/finanzas/centros-costos")
+    @admin_required
+    def fin_crear_centro_costo():
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            codigo=str(d.get("codigo","")).strip().upper()
+            nombre=str(d.get("nombre","")).strip()
+            padre=d.get("centro_padre_id") or None
+            if not codigo or not nombre:return jsonify({"error":"Código y nombre son obligatorios."}),400
+            if conn.execute("SELECT 1 FROM centros_costos WHERE cliente_id=? AND codigo=?",(cid,codigo)).fetchone():
+                return jsonify({"error":"Ya existe un centro de costo con ese código."}),409
+            if padre and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(padre,cid)).fetchone():
+                return jsonify({"error":"El centro de costo padre no existe o está inactivo."}),400
+            centro_id=_insert_id(conn,"""INSERT INTO centros_costos(cliente_id,codigo,nombre,centro_padre_id,activo)
+                VALUES(?,?,?,?,1)""",(cid,codigo,nombre,padre))
+            conn.commit();return jsonify({"ok":True,"id":centro_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.patch("/api/finanzas/centros-costos/<int:centro_id>")
+    @admin_required
+    def fin_actualizar_centro_costo(centro_id):
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM centros_costos WHERE id=? AND cliente_id=?",(centro_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Centro de costo no encontrado."}),404
+            fields=[];vals=[]
+            if "codigo" in d:
+                codigo=str(d.get("codigo","")).strip().upper()
+                if not codigo:return jsonify({"error":"El código es obligatorio."}),400
+                if conn.execute("SELECT 1 FROM centros_costos WHERE cliente_id=? AND codigo=? AND id<>?",(cid,codigo,centro_id)).fetchone():
+                    return jsonify({"error":"Ya existe otro centro de costo con ese código."}),409
+                fields.append("codigo=?");vals.append(codigo)
+            if "nombre" in d:
+                nombre=str(d.get("nombre","")).strip()
+                if not nombre:return jsonify({"error":"El nombre es obligatorio."}),400
+                fields.append("nombre=?");vals.append(nombre)
+            if "centro_padre_id" in d:
+                padre=d.get("centro_padre_id") or None
+                if padre==centro_id:return jsonify({"error":"Un centro de costo no puede ser su propio padre."}),400
+                if padre and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(padre,cid)).fetchone():
+                    return jsonify({"error":"El centro de costo padre no existe o está inactivo."}),400
+                fields.append("centro_padre_id=?");vals.append(padre)
+            if "activo" in d:
+                fields.append("activo=?");vals.append(1 if d["activo"] else 0)
+            if not fields:return jsonify({"ok":True})
+            vals += [centro_id,cid]
+            conn.execute("UPDATE centros_costos SET "+",".join(fields)+",actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",vals)
+            conn.commit();return jsonify({"ok":True})
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
