@@ -64,6 +64,23 @@ def init_erp(get_db):
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(cliente_id,codigo))""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_inv_items_cliente ON inventario_items(cliente_id,activo,codigo)")
+        # Parametrización central del artículo: Inventarios es el maestro único.
+        def _column_exists(table, column):
+            if os.environ.get("DATABASE_URL"):
+                return bool(conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?", (table, column)).fetchone())
+            return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+        for col, definition in (
+            ("precio_base", "REAL NOT NULL DEFAULT 0"),
+            ("tipo_iva", "REAL NOT NULL DEFAULT 10"),
+            ("concepto_presupuestario_ingreso", "TEXT DEFAULT NULL"),
+            ("concepto_presupuestario_egreso", "TEXT DEFAULT NULL"),
+            ("cuenta_debe_compra_id", "INTEGER DEFAULT NULL"),
+            ("cuenta_debe_devolucion_venta_id", "INTEGER DEFAULT NULL"),
+            ("cuenta_haber_venta_id", "INTEGER DEFAULT NULL"),
+            ("cuenta_haber_devolucion_compra_id", "INTEGER DEFAULT NULL"),
+        ):
+            if not _column_exists("inventario_items", col):
+                conn.execute(f"ALTER TABLE inventario_items ADD COLUMN {col} {definition}")
         conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_stock(
             id {idc} PRIMARY KEY, item_id INTEGER NOT NULL, deposito_id INTEGER NOT NULL,
             existencia REAL NOT NULL DEFAULT 0, reservado REAL NOT NULL DEFAULT 0,
