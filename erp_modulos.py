@@ -250,10 +250,21 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            rows=conn.execute("""SELECT i.*,COALESCE(SUM(s.existencia),0) existencia,COALESCE(SUM(s.reservado),0) reservado
+            rows=conn.execute("""SELECT i.*,COALESCE(SUM(s.existencia),0) existencia,COALESCE(SUM(s.reservado),0) reservado,
+                um.codigo unidad_codigo,um.nombre unidad_nombre,um.abreviatura unidad_abreviatura,
+                cc.nombre concepto_compra_nombre,a.nombre articulo_venta_nombre
                 FROM inventario_items i LEFT JOIN inventario_stock s ON s.item_id=i.id
-                WHERE i.cliente_id=? GROUP BY i.id ORDER BY i.codigo""",(cid,)).fetchall()
-            return jsonify([dict(x) for x in rows])
+                LEFT JOIN unidades_medida um ON um.id=i.unidad_medida_id
+                LEFT JOIN conceptos_compra cc ON cc.id=i.concepto_compra_id
+                LEFT JOIN articulos a ON a.id=i.articulo_venta_id
+                WHERE i.cliente_id=? GROUP BY i.id,um.codigo,um.nombre,um.abreviatura,cc.nombre,a.nombre
+                ORDER BY i.activo DESC,i.codigo""",(cid,)).fetchall()
+            data=[]
+            for x in rows:
+                d=dict(x);d["disponible"]=float(d.get("existencia") or 0)-float(d.get("reservado") or 0)
+                d["contabilidad_configurada"]=all(d.get(k) is not None for k in ("cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id"))
+                data.append(d)
+            return jsonify(data)
         finally:conn.close()
 
     @app.post("/api/inventarios/items")
@@ -263,14 +274,66 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            codigo=str(d.get("codigo","")).strip();nombre=str(d.get("nombre","")).strip()
+            codigo=str(d.get("codigo","")).strip().upper();nombre=str(d.get("nombre","")).strip()
             if not codigo or not nombre:return jsonify({"error":"Código y nombre son obligatorios."}),400
-            item_id=_insert_id(conn,"""INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,cuenta_inventario_id,cuenta_costo_id,cuenta_venta_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(cid,codigo,nombre,d.get("concepto_compra_id") or None,d.get("articulo_venta_id") or None,d.get("unidad_medida_id") or None,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),d.get("cuenta_inventario_id") or None,d.get("cuenta_costo_id") or None,d.get("cuenta_venta_id") or None))
-            conn.commit();return jsonify({"ok":True,"id":item_id}),201
+            if conn.execute("SELECT 1 FROM inventario_items WHERE cliente_id=? AND codigo=?",(cid,codigo)).fetchone():return jsonify({"error":"Ya existe un artículo con ese código."}),409
+            unidad_id=d.get("unidad_medida_id") or None
+            if unidad_id and not conn.execute("SELECT 1 FROM unidades_medida WHERE id=? AND cliente_id=? AND activo=1",(unidad_id,cid)).fetchone():return jsonify({"error":"Unidad de medida inválida o inactiva."}),400
+            iva=float(d.get("tipo_iva",10) or 0)
+            if iva not in (0,5,10):return jsonify({"error":"El IVA debe ser 0, 5 o 10."}),400
+            concepto=conn.execute("SELECT * FROM conceptos_compra WHERE cliente_id=? AND codigo=?",(cid,codigo)).fetchone()
+            if not concepto:
+                concepto_id=_insert_id(conn,"INSERT INTO conceptos_compra(cliente_id,codigo,nombre,descripcion,tipo,unidad_medida,unidad_medida_id,stock_minimo,tasa_iva,activo) VALUES(?,?,?,?,?,?,?,?,?,1)",(cid,codigo,nombre,str(d.get("descripcion","")),d.get("tipo","producto"),"",unidad_id,float(d.get("stock_minimo") or 0),iva))
+            else:
+                concepto_id=concepto["id"];conn.execute("UPDATE conceptos_compra SET nombre=?,descripcion=?,tipo=?,unidad_medida_id=?,stock_minimo=?,tasa_iva=?,activo=1 WHERE id=? AND cliente_id=?",(nombre,str(d.get("descripcion","")),d.get("tipo","producto"),unidad_id,float(d.get("stock_minimo") or 0),iva,concepto_id,cid))
+            articulo=conn.execute("SELECT * FROM articulos WHERE codigo=? LIMIT 1",(codigo,)).fetchone()
+            if not articulo:
+                articulo_id=_insert_id(conn,"INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad")))
+            else:
+                articulo_id=articulo["id"];conn.execute("UPDATE articulos SET nombre=?,descripcion=?,unidad=?,activo=1 WHERE id=?",(nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad"),articulo_id))
+            item_id=_insert_id(conn,"INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,precio_base,tipo_iva) VALUES(?,?,?,?,?,?,?,?,?,?)",(cid,codigo,nombre,concepto_id,articulo_id,unidad_id,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),float(d.get("precio_base") or 0),iva))
+            conn.commit();return jsonify({"ok":True,"id":item_id,"concepto_id":concepto_id,"articulo_venta_id":articulo_id}),201
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
+    @app.patch("/api/inventarios/items/<int:item_id>")
+    @staff_required
+    def inv_update_item(item_id):
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Artículo no encontrado."}),404
+            fields=[];vals=[]
+            for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","unidad_medida_id","inventariable"):
+                if c in d:fields.append(c+"=?");vals.append(d[c])
+            if "activo" in d:fields.append("activo=?");vals.append(1 if d["activo"] else 0)
+            if not fields:return jsonify({"ok":True})
+            vals += [item_id,cid];conn.execute("UPDATE inventario_items SET "+",".join(fields)+",actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",vals)
+            if "activo" in d:
+                conn.execute("UPDATE conceptos_compra SET activo=? WHERE id=? AND cliente_id=?",(1 if d["activo"] else 0,row["concepto_compra_id"],cid))
+                conn.execute("UPDATE articulos SET activo=? WHERE id=?",(1 if d["activo"] else 0,row["articulo_venta_id"]))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.patch("/api/inventarios/items/<int:item_id>/contabilidad")
+    @staff_required
+    def inv_accounting(item_id):
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Artículo no encontrado."}),404
+            keys=("concepto_presupuestario_ingreso","concepto_presupuestario_egreso","cuenta_debe_compra_id","cuenta_debe_devolucion_venta_id","cuenta_haber_venta_id","cuenta_haber_devolucion_compra_id")
+            vals=[d.get(k) if k.startswith("concepto_") else (d.get(k) or None) for k in keys]
+            conn.execute("UPDATE inventario_items SET concepto_presupuestario_ingreso=?,concepto_presupuestario_egreso=?,cuenta_debe_compra_id=?,cuenta_debe_devolucion_venta_id=?,cuenta_haber_venta_id=?,cuenta_haber_devolucion_compra_id=?,cuenta_inventario_id=COALESCE(cuenta_inventario_id,?),cuenta_venta_id=COALESCE(cuenta_venta_id,?) WHERE id=? AND cliente_id=?",(*vals,d.get("cuenta_debe_compra_id") or None,d.get("cuenta_haber_venta_id") or None,item_id,cid))
+            if row["concepto_compra_id"]:conn.execute("UPDATE conceptos_compra SET concepto_presupuestario=?,cuenta_contable_id=?,activo=1 WHERE id=? AND cliente_id=?",(d.get("concepto_presupuestario_egreso") or d.get("concepto_presupuestario_ingreso"),d.get("cuenta_debe_compra_id"),row["concepto_compra_id"],cid))
+            conn.commit();return jsonify({"ok":True,"contabilidad_configurada":all(v not in (None,"") for v in vals)})
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
     @app.post("/api/inventarios/movimientos")
     @staff_required
     def inv_move():
