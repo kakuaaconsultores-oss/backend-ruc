@@ -306,7 +306,9 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
                 articulo_id=_insert_id(conn,"INSERT INTO articulos(codigo,nombre,descripcion,unidad) VALUES(?,?,?,?)",(codigo,nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad")))
             else:
                 articulo_id=articulo["id"];conn.execute("UPDATE articulos SET nombre=?,descripcion=?,unidad=?,activo=1 WHERE id=?",(nombre,str(d.get("descripcion","")),str(d.get("unidad_codigo") or "unidad"),articulo_id))
-            item_id=_insert_id(conn,"INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,precio_base,tipo_iva) VALUES(?,?,?,?,?,?,?,?,?,?)",(cid,codigo,nombre,concepto_id,articulo_id,unidad_id,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),float(d.get("precio_base") or 0),iva))
+            metodo=str(d.get("metodo_costeo","PPP")).upper()
+            if metodo not in ("PEPS","PPP"):return jsonify({"error":"El método de costeo debe ser PEPS o PPP."}),400
+            item_id=_insert_id(conn,"INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,articulo_venta_id,unidad_medida_id,inventariable,stock_minimo,precio_base,tipo_iva,metodo_costeo) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(cid,codigo,nombre,concepto_id,articulo_id,unidad_id,int(bool(d.get("inventariable",1))),float(d.get("stock_minimo") or 0),float(d.get("precio_base") or 0),iva,metodo))
             conn.commit();return jsonify({"ok":True,"id":item_id,"concepto_id":concepto_id,"articulo_venta_id":articulo_id}),201
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
@@ -321,7 +323,7 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             row=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=?",(item_id,cid)).fetchone()
             if not row:return jsonify({"error":"Artículo no encontrado."}),404
             fields=[];vals=[]
-            for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","unidad_medida_id","inventariable"):
+            for c in ("nombre","codigo","stock_minimo","precio_base","tipo_iva","metodo_costeo","unidad_medida_id","inventariable"):
                 if c in d:fields.append(c+"=?");vals.append(d[c])
             if "activo" in d:fields.append("activo=?");vals.append(1 if d["activo"] else 0)
             if not fields:return jsonify({"ok":True})
