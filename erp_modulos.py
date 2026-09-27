@@ -152,6 +152,22 @@ def init_erp(get_db):
             descuentos REAL NOT NULL DEFAULT 0, neto REAL NOT NULL DEFAULT 0,
             estado TEXT NOT NULL DEFAULT 'borrador', asiento_id INTEGER DEFAULT NULL,
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(persona_id,periodo))""")
+        # Configuración contable por depósito y circuito de traslados/consumos.
+        for col, definition in (
+            ("cuenta_inventario_id", "INTEGER DEFAULT NULL"),
+            ("cuenta_consumo_id", "INTEGER DEFAULT NULL"),
+        ):
+            if not _column_exists("depositos_inventario", col):
+                conn.execute(f"ALTER TABLE depositos_inventario ADD COLUMN {col} {definition}")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_traslados(
+            id {idc} PRIMARY KEY, cliente_id INTEGER NOT NULL, fecha TEXT NOT NULL,
+            deposito_origen_id INTEGER NOT NULL, deposito_destino_id INTEGER NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'confirmado', observacion TEXT DEFAULT '',
+            creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS inventario_traslado_detalles(
+            id {idc} PRIMARY KEY, traslado_id INTEGER NOT NULL, item_id INTEGER NOT NULL,
+            cantidad REAL NOT NULL, costo_unitario REAL NOT NULL DEFAULT 0)""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_inv_traslado_cliente ON inventario_traslados(cliente_id,fecha,id)")
         # Cada cliente recibe un depósito principal.
         clientes=conn.execute("SELECT id FROM clientes").fetchall()
         for row in clientes:
@@ -370,8 +386,105 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            dep_id=_insert_id(conn,"INSERT INTO depositos_inventario(cliente_id,codigo,nombre,ubicacion) VALUES(?,?,?,?)",(cid,str(d.get("codigo","")).strip(),str(d.get("nombre","")).strip(),str(d.get("ubicacion",""))))
+            dep_id=_insert_id(conn,"""INSERT INTO depositos_inventario(cliente_id,codigo,nombre,ubicacion,cuenta_inventario_id,cuenta_consumo_id)
+                VALUES(?,?,?,?,?,?)""",(cid,str(d.get("codigo","")).strip().upper(),str(d.get("nombre","")).strip(),str(d.get("ubicacion","")),d.get("cuenta_inventario_id") or None,d.get("cuenta_consumo_id") or None))
             conn.commit();return jsonify({"ok":True,"id":dep_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.get("/api/inventarios/traslados")
+    @usuario_required
+    def inv_traslados():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT t.*,o.codigo deposito_origen_codigo,o.nombre deposito_origen_nombre,
+                d.codigo deposito_destino_codigo,d.nombre deposito_destino_nombre
+                FROM inventario_traslados t
+                JOIN depositos_inventario o ON o.id=t.deposito_origen_id
+                JOIN depositos_inventario d ON d.id=t.deposito_destino_id
+                WHERE t.cliente_id=? ORDER BY t.id DESC LIMIT 200""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally:conn.close()
+
+    @app.post("/api/inventarios/traslados")
+    @staff_required
+    def inv_crear_traslado():
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            origen=int(d.get("deposito_origen_id") or 0);destino=int(d.get("deposito_destino_id") or 0)
+            if not origen or not destino or origen==destino:return jsonify({"error":"Seleccioná depósitos de origen y destino diferentes."}),400
+            ods=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=? AND activo=1",(origen,cid)).fetchone()
+            dds=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=? AND activo=1",(destino,cid)).fetchone()
+            if not ods or not dds:return jsonify({"error":"Depósito de origen o destino inválido."}),400
+            detalles=d.get("detalles") or []
+            if not detalles:return jsonify({"error":"Agregá al menos un artículo al traslado."}),400
+            fecha=str(d.get("fecha") or datetime.utcnow().strftime("%Y-%m-%d"))
+            tid=_insert_id(conn,"""INSERT INTO inventario_traslados(cliente_id,fecha,deposito_origen_id,deposito_destino_id,estado,observacion,creado_por)
+                VALUES(?,?,?,?,?,?,?)""",(cid,fecha,origen,destino,"confirmado",str(d.get("observacion") or ""),_usuario_id(conn)))
+            total=0
+            for det in detalles:
+                item_id=int(det.get("item_id") or 0);cantidad=float(det.get("cantidad") or 0)
+                if not item_id or cantidad<=0: raise ValueError("Cada línea debe tener artículo y cantidad mayor a cero.")
+                item=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=? AND activo=1 AND inventariable=1",(item_id,cid)).fetchone()
+                if not item: raise ValueError("Artículo inventariable inválido.")
+                stock=conn.execute("SELECT existencia FROM inventario_stock WHERE item_id=? AND deposito_id=?",(item_id,origen)).fetchone()
+                existencia=float(stock["existencia"] or 0) if stock else 0
+                if existencia<cantidad: raise ValueError(f"Stock insuficiente para {item['nombre']}. Disponible: {existencia:g}.")
+                costo=float(item["costo_promedio"] or 0)
+                conn.execute("""INSERT INTO inventario_traslado_detalles(traslado_id,item_id,cantidad,costo_unitario) VALUES(?,?,?,?)""",(tid,item_id,cantidad,costo))
+                conn.execute("UPDATE inventario_stock SET existencia=existencia-?,actualizado_en=CURRENT_TIMESTAMP WHERE item_id=? AND deposito_id=?",(cantidad,item_id,origen))
+                conn.execute("""INSERT INTO inventario_stock(item_id,deposito_id,existencia,reservado) VALUES(?,?,?,0)
+                    ON CONFLICT(item_id,deposito_id) DO UPDATE SET existencia=inventario_stock.existencia+excluded.existencia,actualizado_en=CURRENT_TIMESTAMP""",(item_id,destino,cantidad))
+                conn.execute("""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,referencia_tipo,referencia_id,observacion,creado_por)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(cid,item_id,origen,fecha,"TRASLADO_SALIDA",-cantidad,costo,"TRASLADO",tid,str(d.get("observacion") or ""),_usuario_id(conn)))
+                conn.execute("""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,referencia_tipo,referencia_id,observacion,creado_por)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(cid,item_id,destino,fecha,"TRASLADO_ENTRADA",cantidad,costo,"TRASLADO",tid,str(d.get("observacion") or ""),_usuario_id(conn)))
+                total += cantidad*costo
+            # Si los depósitos usan cuentas de inventario distintas, el traslado genera reclasificación contable.
+            cuenta_origen=ods["cuenta_inventario_id"];cuenta_destino=dds["cuenta_inventario_id"]
+            asiento_id=None
+            if cuenta_origen and cuenta_destino and int(cuenta_origen)!=int(cuenta_destino) and total:
+                uid=_usuario_id(conn)
+                asiento_id=_insert_id(conn,"""INSERT INTO asientos_contables(cliente_id,fecha,concepto,origen,referencia_tipo,referencia_id,estado,usuario_creador_id)
+                    VALUES(?,?,?,?,?,?,?,?)""",(cid,fecha,f"Traslado de inventario {ods['nombre']} → {dds['nombre']}","INVENTARIO","TRASLADO",tid,"borrador",uid))
+                conn.execute("INSERT INTO detalle_asientos(asiento_id,cuenta_id,descripcion,debe,haber,orden) VALUES(?,?,?,?,?,1)",(asiento_id,cuenta_destino,f"Entrada a {dds['nombre']}",total,0))
+                conn.execute("INSERT INTO detalle_asientos(asiento_id,cuenta_id,descripcion,debe,haber,orden) VALUES(?,?,?,?,?,2)",(asiento_id,cuenta_origen,f"Salida de {ods['nombre']}",0,total))
+            conn.commit();return jsonify({"ok":True,"id":tid,"asiento_id":asiento_id}),201
+        except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
+        finally:conn.close()
+
+    @app.post("/api/inventarios/consumos")
+    @staff_required
+    def inv_consumo():
+        d=request.get_json() or {};conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            dep=int(d.get("deposito_id") or 0);item_id=int(d.get("item_id") or 0);cantidad=float(d.get("cantidad") or 0)
+            if not dep or not item_id or cantidad<=0:return jsonify({"error":"Depósito, artículo y cantidad son obligatorios."}),400
+            deposito=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=? AND activo=1",(dep,cid)).fetchone()
+            item=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=? AND activo=1 AND inventariable=1",(item_id,cid)).fetchone()
+            if not deposito or not item:return jsonify({"error":"Depósito o artículo inválido."}),400
+            stock=conn.execute("SELECT existencia FROM inventario_stock WHERE item_id=? AND deposito_id=?",(item_id,dep)).fetchone()
+            existencia=float(stock["existencia"] or 0) if stock else 0
+            if existencia<cantidad:return jsonify({"error":f"Stock insuficiente. Disponible: {existencia:g}."}),400
+            costo=float(item["costo_promedio"] or 0);importe=cantidad*costo
+            fecha=str(d.get("fecha") or datetime.utcnow().strftime("%Y-%m-%d"))
+            mid=_insert_id(conn,"""INSERT INTO inventario_movimientos(cliente_id,item_id,deposito_id,fecha,tipo,cantidad,costo_unitario,referencia_tipo,observacion,creado_por)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",(cid,item_id,dep,fecha,"SALIDA_CONSUMO",-cantidad,costo,"CONSUMO",str(d.get("observacion") or ""),_usuario_id(conn)))
+            conn.execute("UPDATE inventario_stock SET existencia=existencia-?,actualizado_en=CURRENT_TIMESTAMP WHERE item_id=? AND deposito_id=?",(cantidad,item_id,dep))
+            asiento_id=None
+            if deposito["cuenta_consumo_id"] and deposito["cuenta_inventario_id"] and importe:
+                uid=_usuario_id(conn)
+                asiento_id=_insert_id(conn,"""INSERT INTO asientos_contables(cliente_id,fecha,concepto,origen,referencia_tipo,referencia_id,estado,usuario_creador_id)
+                    VALUES(?,?,?,?,?,?,?,?)""",(cid,fecha,f"Consumo de {item['nombre']}","INVENTARIO","CONSUMO",mid,"borrador",uid))
+                conn.execute("INSERT INTO detalle_asientos(asiento_id,cuenta_id,descripcion,debe,haber,orden) VALUES(?,?,?,?,?,1)",(asiento_id,deposito["cuenta_consumo_id"],f"Consumo {item['nombre']}",importe,0))
+                conn.execute("INSERT INTO detalle_asientos(asiento_id,cuenta_id,descripcion,debe,haber,orden) VALUES(?,?,?,?,?,2)",(asiento_id,deposito["cuenta_inventario_id"],f"Salida de {item['nombre']}",0,importe))
+            conn.commit();return jsonify({"ok":True,"movimiento_id":mid,"asiento_id":asiento_id}),201
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
 
@@ -384,8 +497,10 @@ def register(app,get_db,staff_required,usuario_required,admin_required):
             if err:return jsonify({"error":err}),401
             row=conn.execute("SELECT * FROM depositos_inventario WHERE id=? AND cliente_id=?",(deposito_id,cid)).fetchone()
             if not row:return jsonify({"error":"Depósito no encontrado."}),404
-            conn.execute("UPDATE depositos_inventario SET codigo=?,nombre=?,ubicacion=?,activo=? WHERE id=? AND cliente_id=?",
-                (str(d.get("codigo",row["codigo"])).strip().upper(),str(d.get("nombre",row["nombre"])).strip(),str(d.get("ubicacion",row["ubicacion"] or "")),1 if d.get("activo",row["activo"]) else 0,deposito_id,cid))
+            conn.execute("""UPDATE depositos_inventario SET codigo=?,nombre=?,ubicacion=?,activo=?,cuenta_inventario_id=?,cuenta_consumo_id=?
+                WHERE id=? AND cliente_id=?""",
+                (str(d.get("codigo",row["codigo"])).strip().upper(),str(d.get("nombre",row["nombre"])).strip(),str(d.get("ubicacion",row["ubicacion"] or "")),
+                 1 if d.get("activo",row["activo"]) else 0,d.get("cuenta_inventario_id",row["cuenta_inventario_id"]) or None,d.get("cuenta_consumo_id",row["cuenta_consumo_id"]) or None,deposito_id,cid))
             conn.commit();return jsonify({"ok":True})
         except Exception as e:conn.rollback();return jsonify({"error":str(e)}),400
         finally:conn.close()
