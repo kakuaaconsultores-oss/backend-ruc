@@ -131,6 +131,10 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             if not _column_exists("comprobantes_compra", "timbrado_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
+            if not _column_exists("comprobantes_compra", "centro_costo_id"):
+                conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN centro_costo_id INTEGER")
+            if not _column_exists("comprobantes_compra_detalle", "centro_costo_id"):
+                conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN centro_costo_id INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
@@ -1032,9 +1036,11 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            rows=conn.execute("""SELECT c.*,p.razon_social proveedor,t.nombre tipo_nombre
+            rows=conn.execute("""SELECT c.*,p.razon_social proveedor,t.nombre tipo_nombre,
+                cc.codigo centro_costo_codigo,cc.nombre centro_costo_nombre
                 FROM comprobantes_compra c JOIN proveedores p ON p.id=c.proveedor_id
                 LEFT JOIN tipos_comprobante_compra t ON t.id=c.tipo_comprobante_id
+                LEFT JOIN centros_costos cc ON cc.id=c.centro_costo_id AND cc.cliente_id=c.cliente_id
                 WHERE c.cliente_id=? ORDER BY c.fecha DESC,c.id DESC""",(cid,)).fetchall()
             return jsonify([dict(x) for x in rows])
         finally: conn.close()
@@ -1049,10 +1055,13 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             required=["proveedor_id","numero","fecha"]
             if any(d.get(x) in (None,"") for x in required): return jsonify({"error":"Proveedor, número y fecha son obligatorios."}),400
             if int(d["proveedor_id"]) and not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(int(d["proveedor_id"]),cid)).fetchone(): return jsonify({"error":"Proveedor inválido."}),400
-            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
+            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","centro_costo_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
             timbrado,terr=_validar_timbrado(conn,cid,int(d["proveedor_id"]),d.get("tipo_comprobante_id"),d["numero"],d["fecha"],d.get("timbrado_id"))
             if terr:return jsonify({"error":terr}),400
-            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
+            centro_costo_id=d.get("centro_costo_id") or None
+            if centro_costo_id and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_costo_id),cid)).fetchone():
+                return jsonify({"error":"El centro de costo seleccionado no existe, pertenece a otra empresa o está inactivo."}),400
+            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
             cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
             if d.get("condicion_id"):
                 condicion=conn.execute("SELECT * FROM condiciones_compra WHERE id=? AND cliente_id=? AND activo=1",(int(d["condicion_id"]),cid)).fetchone()
@@ -1082,8 +1091,11 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cantidad_item=float(item.get("cantidad",1) or 1)
                 precio_item=float(item.get("precio_unitario",0) or 0)
                 subtotal_item=float(item.get("subtotal",0) or 0)
-                conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id) VALUES(?,?,?,?,?,?,?,?)""",
-                    (cidc,concepto_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle))
+                centro_detalle=item.get("centro_costo_id") or centro_costo_id
+                if centro_detalle and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_detalle),cid)).fetchone():
+                    return jsonify({"error":"El centro de costo de una línea no existe, pertenece a otra empresa o está inactivo."}),400
+                conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id,centro_costo_id) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (cidc,concepto_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle,centro_detalle))
                 if concepto_id not in (None,"","null") and d.get("estado","registrado") not in ("borrador","anulado"):
                     registrar_ingreso_compra(conn,cid,int(cidc),{
                         "concepto_id":concepto_id,"cantidad":cantidad_item,"precio_unitario":precio_item
