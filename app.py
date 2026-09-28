@@ -8,6 +8,7 @@ import hashlib
 import html
 import shutil
 import requests
+import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -661,6 +662,28 @@ if DB_BACKEND == "postgres":
     init_db_postgres()
 else:
     init_db()
+
+def init_sifen_cache_db():
+    conn = get_db()
+    try:
+        id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "datetime('now')"
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS documentos_electronicos_cache (
+            id {id_type}, cliente_id INTEGER NOT NULL, cdc TEXT NOT NULL, xml_original TEXT NOT NULL,
+            fecha_emision TEXT DEFAULT '', ruc_emisor TEXT DEFAULT '', razon_social_emisor TEXT DEFAULT '',
+            ruc_receptor TEXT DEFAULT '', razon_social_receptor TEXT DEFAULT '', moneda TEXT DEFAULT '',
+            total REAL DEFAULT 0, total_iva REAL DEFAULT 0, timbrado TEXT DEFAULT '', establecimiento TEXT DEFAULT '',
+            punto_expedicion TEXT DEFAULT '', numero_documento TEXT DEFAULT '', codigo_respuesta TEXT DEFAULT '',
+            estado TEXT DEFAULT '', fuente TEXT NOT NULL DEFAULT 'XML',
+            creado_en TEXT DEFAULT {now_default}, actualizado_en TEXT DEFAULT {now_default},
+            UNIQUE(cliente_id, cdc)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dte_cache_cliente_fecha ON documentos_electronicos_cache(cliente_id, fecha_emision)")
+        conn.commit()
+    finally:
+        conn.close()
+
+init_sifen_cache_db()
 
 def insertar_y_obtener_id(conn, sql, params=()):
     if DB_BACKEND == "postgres":
