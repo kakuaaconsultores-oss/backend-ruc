@@ -27,7 +27,7 @@ def _serialize_element(node):
         return None
     return ET.tostring(node, encoding="unicode")
 
-def consultar_cdc_sifen(cdc, ambiente=None):
+def consultar_cdc_sifen(cdc, ambiente=None, cert_path=None, key_path=None, ca_bundle=None):
     """
     Consulta oficial SIFEN por CDC mediante WS Consulta DE (siConsDE).
     Requiere certificado digital de cliente con autenticación TLS mutua.
@@ -45,9 +45,9 @@ def consultar_cdc_sifen(cdc, ambiente=None):
     else:
         endpoint = "https://sifen-test.set.gov.py/de/ws/consultas/consulta.wsdl"
 
-    cert_path = os.environ.get("SIFEN_CERT_PATH", "").strip()
-    key_path = os.environ.get("SIFEN_KEY_PATH", "").strip()
-    ca_bundle = os.environ.get("SIFEN_CA_BUNDLE", "").strip() or True
+    cert_path = str(cert_path or os.environ.get("SIFEN_CERT_PATH", "")).strip()
+    key_path = str(key_path or os.environ.get("SIFEN_KEY_PATH", "")).strip()
+    ca_bundle = str(ca_bundle or os.environ.get("SIFEN_CA_BUNDLE", "")).strip() or True
     if not cert_path or not key_path:
         raise RuntimeError(
             "La consulta SIFEN requiere configurar SIFEN_CERT_PATH y SIFEN_KEY_PATH "
