@@ -3570,6 +3570,41 @@ def api_importar_dte_xml():
         app.logger.exception("Error guardando DTE XML")
         return jsonify({"error":"No se pudo guardar el DTE importado."}),500
 
+@app.route("/api/sifen/configuracion", methods=["GET"])
+@admin_required
+def api_sifen_config_get():
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+    conn=get_db()
+    try:
+        row=conn.execute("SELECT ambiente, activo, cert_path, key_path, ca_bundle FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
+        cliente=conn.execute("SELECT ruc, razon_social FROM clientes WHERE id=?",(cliente_id,)).fetchone()
+        if not row:return jsonify({"configurado":False,"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":"test","activo":False,"certificado_configurado":False,"clave_configurada":False}),200
+        return jsonify({"configurado":bool(row["activo"] and row["cert_path"] and row["key_path"]),"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":row["ambiente"],"activo":bool(row["activo"]),"certificado_configurado":bool(row["cert_path"]),"clave_configurada":bool(row["key_path"])}),200
+    finally:conn.close()
+
+@app.route("/api/sifen/configuracion", methods=["PUT"])
+@admin_required
+def api_sifen_config_put():
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+    data=request.get_json(silent=True) or {}
+    ambiente=str(data.get("ambiente") or "test").strip().lower()
+    if ambiente in ("prod","produccion","production"):ambiente="produccion"
+    if ambiente not in ("test","produccion"):return jsonify({"error":"El ambiente debe ser test o produccion."}),400
+    activo=1 if bool(data.get("activo")) else 0
+    cert_path=str(data.get("cert_path") or "").strip()
+    key_path=str(data.get("key_path") or "").strip()
+    ca_bundle=str(data.get("ca_bundle") or "").strip()
+    if activo and (not cert_path or not key_path):return jsonify({"error":"Para activar SIFEN debés indicar certificado y clave privada en el servidor."}),400
+    conn=get_db()
+    try:
+        row=conn.execute("SELECT id FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
+        if row:conn.execute("UPDATE sifen_configuracion SET ambiente=?, activo=?, cert_path=?, key_path=?, ca_bundle=?, actualizado_en=? WHERE cliente_id=?",(ambiente,activo,cert_path,key_path,ca_bundle,datetime.utcnow().isoformat(),cliente_id))
+        else:conn.execute("INSERT INTO sifen_configuracion (cliente_id,ambiente,activo,cert_path,key_path,ca_bundle) VALUES (?,?,?,?,?,?)",(cliente_id,ambiente,activo,cert_path,key_path,ca_bundle))
+        conn.commit()
+    finally:conn.close()
+    return api_sifen_config_get()
 @app.route("/api/sifen/consulta-cdc", methods=["POST"])
 def api_sifen_consulta_cdc():
     cliente_id,error=obtener_cliente_contable()
