@@ -3462,6 +3462,95 @@ def buscar_ruc():
 
 
 
+def _xml_name(tag):
+    return str(tag or "").split("}")[-1].split(":")[-1]
+
+def _xml_text(root, names):
+    wanted=set(names if isinstance(names,(list,tuple,set)) else [names])
+    for node in root.iter():
+        if _xml_name(node.tag) in wanted and (node.text or "").strip():
+            return (node.text or "").strip()
+    return ""
+
+def _parse_dte_xml(xml_text):
+    try:
+        root=ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError("El archivo no contiene XML válido.") from exc
+    cdc=""
+    for node in root.iter():
+        ident=str(node.attrib.get("Id","")).strip()
+        if len(ident)==44 and ident.isdigit():
+            cdc=ident
+            break
+    if not cdc:
+        cdc=_xml_text(root,["CDC"])
+    if len(cdc)!=44 or not cdc.isdigit():
+        raise ValueError("No se encontró un CDC válido de 44 dígitos en el XML.")
+    def numero(names):
+        raw=_xml_text(root,names).replace(".","").replace(",",".")
+        try:return float(raw or 0)
+        except ValueError:return 0.0
+    return {
+        "cdc":cdc,
+        "fecha_emision":_xml_text(root,["dFeEmiDE"]),
+        "ruc_emisor":_xml_text(root,["dRucEm"]),
+        "razon_social_emisor":_xml_text(root,["dNomEmi","dRazSocEm"]),
+        "ruc_receptor":_xml_text(root,["dRucRec"]),
+        "razon_social_receptor":_xml_text(root,["dNomRec"]),
+        "moneda":_xml_text(root,["cMoneOpe"]),
+        "total":numero(["dTotGralOpe"]),
+        "total_iva":numero(["dTotIVA"]),
+        "timbrado":_xml_text(root,["dNumTim"]),
+        "establecimiento":_xml_text(root,["dEst"]),
+        "punto_expedicion":_xml_text(root,["dPunExp"]),
+        "numero_documento":_xml_text(root,["dNumDoc"])
+    }
+
+def _guardar_dte_cache(cliente_id, dte, xml_text, fuente="XML", codigo_respuesta=""):
+    conn=get_db()
+    try:
+        fila=conn.execute("SELECT id FROM documentos_electronicos_cache WHERE cliente_id=? AND cdc=?",(cliente_id,dte["cdc"])).fetchone()
+        estado="vigente" if codigo_respuesta in ("","0422") else codigo_respuesta
+        vals=(dte["fecha_emision"],dte["ruc_emisor"],dte["razon_social_emisor"],dte["ruc_receptor"],dte["razon_social_receptor"],dte["moneda"],dte["total"],dte["total_iva"],dte["timbrado"],dte["establecimiento"],dte["punto_expedicion"],dte["numero_documento"],codigo_respuesta,estado,fuente,xml_text)
+        if fila:
+            conn.execute("""UPDATE documentos_electronicos_cache SET fecha_emision=?,ruc_emisor=?,razon_social_emisor=?,ruc_receptor=?,razon_social_receptor=?,moneda=?,total=?,total_iva=?,timbrado=?,establecimiento=?,punto_expedicion=?,numero_documento=?,codigo_respuesta=?,estado=?,fuente=?,xml_original=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=?""",vals+(fila["id"],))
+        else:
+            conn.execute("""INSERT INTO documentos_electronicos_cache (cliente_id,cdc,fecha_emision,ruc_emisor,razon_social_emisor,ruc_receptor,razon_social_receptor,moneda,total,total_iva,timbrado,establecimiento,punto_expedicion,numero_documento,codigo_respuesta,estado,fuente,xml_original) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(cliente_id,dte["cdc"],*vals))
+        conn.commit()
+    finally:conn.close()
+
+@app.route("/api/compras/dte/<string:cdc>", methods=["GET"])
+def api_dte_cache(cdc):
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+    cdc=str(cdc).replace(" ","").strip()
+    if len(cdc)!=44 or not cdc.isdigit():return jsonify({"error":"El CDC debe contener exactamente 44 dígitos."}),400
+    conn=get_db()
+    try:
+        fila=conn.execute("SELECT * FROM documentos_electronicos_cache WHERE cliente_id=? AND cdc=?",(cliente_id,cdc)).fetchone()
+        if not fila:return jsonify({"found":False,"cdc":cdc}),404
+        return jsonify({"found":True,"fuente":fila["fuente"],"documento":dict(fila),"xml_de":fila["xml_original"]}),200
+    finally:conn.close()
+
+@app.route("/api/compras/dte/importar-xml", methods=["POST"])
+@csrf_required
+def api_importar_dte_xml():
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+    archivo=request.files.get("xml")
+    if not archivo:return jsonify({"error":"Seleccioná un archivo XML."}),400
+    try:xml_text=archivo.read().decode("utf-8-sig")
+    except UnicodeDecodeError:return jsonify({"error":"No se pudo leer el XML como UTF-8."}),400
+    try:
+        dte=_parse_dte_xml(xml_text)
+        _guardar_dte_cache(cliente_id,dte,xml_text,"XML","")
+        return jsonify({"ok":True,"fuente":"XML","documento":dte,"xml_de":xml_text}),200
+    except ValueError as exc:return jsonify({"error":str(exc)}),400
+    except Exception:
+        app.logger.exception("Error guardando DTE XML")
+        return jsonify({"error":"No se pudo guardar el DTE importado."}),500
+
 @app.route("/api/sifen/consulta-cdc", methods=["POST"])
 def api_sifen_consulta_cdc():
     data=request.get_json(silent=True) or {}
