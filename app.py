@@ -3553,6 +3553,8 @@ def api_importar_dte_xml():
 
 @app.route("/api/sifen/consulta-cdc", methods=["POST"])
 def api_sifen_consulta_cdc():
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
     data=request.get_json(silent=True) or {}
     cdc=str(data.get("cdc") or "").strip()
     ambiente=str(data.get("ambiente") or os.environ.get("SIFEN_AMBIENTE","test")).strip().lower()
@@ -3564,6 +3566,12 @@ def api_sifen_consulta_cdc():
             return jsonify({"error":"El CDC no fue encontrado en SIFEN.","sifen":resultado}),404
         if not resultado.get("ok"):
             return jsonify({"error":resultado.get("mensaje") or "SIFEN no pudo completar la consulta.","sifen":resultado}),502
+        if resultado.get("ok") and resultado.get("xml_de"):
+            try:
+                dte=_parse_dte_xml(resultado["xml_de"])
+                _guardar_dte_cache(cliente_id,dte,resultado["xml_de"],"SIFEN_WS",resultado.get("codigo",""))
+            except Exception:
+                app.logger.exception("No se pudo guardar el DTE consultado en SIFEN")
         return jsonify(resultado),200
     except ValueError as exc:
         return jsonify({"error":str(exc)}),400
