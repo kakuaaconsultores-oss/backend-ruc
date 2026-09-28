@@ -28,6 +28,7 @@ except ImportError:
     dict_row = None
 from flask import Flask, request, jsonify, send_from_directory
 from erp_modulos import stock_suficiente_para_venta, registrar_salida_venta
+from sifen_consulta import consultar_cdc_sifen
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -3436,6 +3437,29 @@ def buscar_ruc():
     except requests.RequestException:
         return jsonify({"error": "No se pudo conectar con el servicio de búsqueda de RUC."}), 502
 
+
+
+@app.route("/api/sifen/consulta-cdc", methods=["POST"])
+def api_sifen_consulta_cdc():
+    data=request.get_json(silent=True) or {}
+    cdc=str(data.get("cdc") or "").strip()
+    ambiente=str(data.get("ambiente") or os.environ.get("SIFEN_AMBIENTE","test")).strip().lower()
+    try:
+        resultado=consultar_cdc_sifen(cdc, ambiente=ambiente)
+        if resultado.get("codigo") == "0421":
+            return jsonify({"error":resultado.get("mensaje") or "El certificado no tiene permiso para consultar este DE.","sifen":resultado}),403
+        if resultado.get("codigo") == "0420":
+            return jsonify({"error":"El CDC no fue encontrado en SIFEN.","sifen":resultado}),404
+        if not resultado.get("ok"):
+            return jsonify({"error":resultado.get("mensaje") or "SIFEN no pudo completar la consulta.","sifen":resultado}),502
+        return jsonify(resultado),200
+    except ValueError as exc:
+        return jsonify({"error":str(exc)}),400
+    except RuntimeError as exc:
+        return jsonify({"error":str(exc)}),502
+    except Exception:
+        app.logger.exception("Error inesperado consultando SIFEN por CDC")
+        return jsonify({"error":"No se pudo completar la consulta SIFEN."}),500
 
 if __name__ == "__main__":
 
