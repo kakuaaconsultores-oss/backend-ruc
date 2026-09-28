@@ -14,7 +14,7 @@ TIPOS_COMPROBANTE_DEFAULT = [
     ("OTRO", "Otro", 1),
 ]
 ESTADOS_COMPROBANTE = ["borrador", "registrado", "validado", "pendiente_contabilizar", "contabilizado", "anulado", "pagado"]
-ESTADOS_OC = ["borrador", "emitida", "recibida", "facturada", "cerrada", "anulada"]
+ESTADOS_OC = ["borrador", "emitida", "aprobada", "parcialmente_recibida", "recibida", "cerrada", "anulada"]
 ESTADOS_OP = ["borrador", "solicitada", "aprobada", "pagada", "anulada"]
 
 def _now():
@@ -113,12 +113,31 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 numero TEXT, fecha TEXT NOT NULL, fecha_entrega TEXT DEFAULT NULL, condicion_id INTEGER DEFAULT NULL,
-                forma_pago_id INTEGER DEFAULT NULL, estado TEXT NOT NULL DEFAULT 'borrador',
-                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
+                forma_pago_id INTEGER DEFAULT NULL, centro_costo_id INTEGER DEFAULT NULL,
+                estado TEXT NOT NULL DEFAULT 'borrador', moneda TEXT NOT NULL DEFAULT 'PYG',
+                observacion TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, creado_por INTEGER, creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
                 id {id_col} PRIMARY KEY, orden_id INTEGER NOT NULL, concepto_id INTEGER,
-                descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
-                iva_tasa REAL NOT NULL DEFAULT 10, subtotal REAL NOT NULL DEFAULT 0)""")
+                item_id INTEGER DEFAULT NULL, deposito_id INTEGER DEFAULT NULL, centro_costo_id INTEGER DEFAULT NULL,
+                descripcion TEXT NOT NULL, unidad_medida TEXT DEFAULT '', cantidad REAL NOT NULL DEFAULT 1,
+                cantidad_recibida REAL NOT NULL DEFAULT 0, precio_unitario REAL NOT NULL DEFAULT 0,
+                iva_tasa REAL NOT NULL DEFAULT 10, descuento REAL NOT NULL DEFAULT 0, subtotal REAL NOT NULL DEFAULT 0)""")
+            for table, column, definition in (
+                ("ordenes_compra","centro_costo_id","INTEGER"),
+                ("ordenes_compra","moneda","TEXT NOT NULL DEFAULT 'PYG'"),
+                ("ordenes_compra","actualizado_en","TEXT DEFAULT CURRENT_TIMESTAMP"),
+                ("ordenes_compra_detalle","item_id","INTEGER"),
+                ("ordenes_compra_detalle","deposito_id","INTEGER"),
+                ("ordenes_compra_detalle","centro_costo_id","INTEGER"),
+                ("ordenes_compra_detalle","unidad_medida","TEXT DEFAULT ''"),
+                ("ordenes_compra_detalle","cantidad_recibida","REAL NOT NULL DEFAULT 0"),
+                ("ordenes_compra_detalle","descuento","REAL NOT NULL DEFAULT 0"),
+            ):
+                if not _column_exists(table,column):
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_oc_cliente_fecha ON ordenes_compra(cliente_id,fecha,estado)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_oc_detalle_orden ON ordenes_compra_detalle(orden_id)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, proveedor_id INTEGER NOT NULL,
                 tipo_comprobante_id INTEGER, numero TEXT NOT NULL, cdc TEXT DEFAULT '', fecha TEXT NOT NULL,
@@ -1103,6 +1122,133 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.commit(); return jsonify({"id":cidc}),201
         except Exception as e:
             conn.rollback(); return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.get("/api/compras/ordenes")
+    @usuario_required
+    def listar_ordenes_compra():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            rows=conn.execute("""SELECT oc.id,oc.numero,oc.fecha,oc.fecha_entrega,oc.estado,oc.moneda,oc.total,
+                    p.razon_social proveedor,p.ruc,
+                    cc.codigo centro_costo_codigo,cc.nombre centro_costo_nombre,
+                    COALESCE(SUM(d.cantidad),0) cantidad_pedida,
+                    COALESCE(SUM(d.cantidad_recibida),0) cantidad_recibida
+                FROM ordenes_compra oc
+                JOIN proveedores p ON p.id=oc.proveedor_id
+                LEFT JOIN centros_costos cc ON cc.id=oc.centro_costo_id AND cc.cliente_id=oc.cliente_id
+                LEFT JOIN ordenes_compra_detalle d ON d.orden_id=oc.id
+                WHERE oc.cliente_id=?
+                GROUP BY oc.id,p.razon_social,p.ruc,cc.codigo,cc.nombre
+                ORDER BY oc.fecha DESC,oc.id DESC""",(cid,)).fetchall()
+            return jsonify([dict(x) for x in rows])
+        finally: conn.close()
+
+    @app.get("/api/compras/ordenes/<int:orden_id>")
+    @usuario_required
+    def detalle_orden_compra(orden_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            oc=conn.execute("""SELECT oc.*,p.razon_social proveedor,p.ruc,
+                    cc.codigo centro_costo_codigo,cc.nombre centro_costo_nombre,
+                    c.nombre condicion_nombre
+                FROM ordenes_compra oc JOIN proveedores p ON p.id=oc.proveedor_id
+                LEFT JOIN centros_costos cc ON cc.id=oc.centro_costo_id AND cc.cliente_id=oc.cliente_id
+                LEFT JOIN condiciones_compra c ON c.id=oc.condicion_id
+                WHERE oc.id=? AND oc.cliente_id=?""",(orden_id,cid)).fetchone()
+            if not oc:return jsonify({"error":"Orden de compra no encontrada."}),404
+            det=conn.execute("""SELECT d.*,i.codigo item_codigo,i.nombre item_nombre,
+                    u.nombre unidad_nombre,dep.codigo deposito_codigo,dep.nombre deposito_nombre,
+                    c.codigo centro_linea_codigo,c.nombre centro_linea_nombre
+                FROM ordenes_compra_detalle d
+                LEFT JOIN inventario_items i ON i.id=d.item_id
+                LEFT JOIN unidades_medida u ON u.id=i.unidad_medida_id
+                LEFT JOIN depositos_inventario dep ON dep.id=d.deposito_id
+                LEFT JOIN centros_costos c ON c.id=d.centro_costo_id
+                WHERE d.orden_id=? ORDER BY d.id""",(orden_id,)).fetchall()
+            return jsonify({"orden":dict(oc),"detalle":[dict(x) for x in det]})
+        finally: conn.close()
+
+    @app.post("/api/compras/ordenes")
+    @staff_required
+    def crear_orden_compra():
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            proveedor_id=d.get("proveedor_id")
+            fecha=str(d.get("fecha") or "")[:10]
+            if not proveedor_id or not fecha:return jsonify({"error":"Proveedor y fecha son obligatorios."}),400
+            proveedor=conn.execute("SELECT id FROM proveedores WHERE id=? AND cliente_id=? AND estado='activo'",(int(proveedor_id),cid)).fetchone()
+            if not proveedor:return jsonify({"error":"El proveedor no existe o está inactivo."}),400
+            centro=d.get("centro_costo_id") or None
+            if centro and not conn.execute("SELECT id FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro),cid)).fetchone():
+                return jsonify({"error":"El centro de costo seleccionado no existe o está inactivo."}),400
+            detalle=d.get("detalle") or []
+            if not detalle:return jsonify({"error":"Agregá al menos un artículo a la orden de compra."}),400
+            numero=f"OC-{int(conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM ordenes_compra').fetchone()[0]):06d}"
+            vals=[cid,int(proveedor_id),numero,fecha,d.get("fecha_entrega") or None,d.get("condicion_id") or None,centro,d.get("estado") or "borrador",d.get("moneda") or "PYG",d.get("observacion") or "",0,_usuario_id(conn)]
+            oid=insertar_id(conn,"INSERT INTO ordenes_compra(cliente_id,proveedor_id,numero,fecha,fecha_entrega,condicion_id,centro_costo_id,estado,moneda,observacion,total,creado_por) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",vals)
+            total=0
+            for item in detalle:
+                item_id=item.get("item_id") or None
+                if not item_id:return jsonify({"error":"Cada línea debe seleccionar un artículo de Inventarios."}),400
+                art=conn.execute("""SELECT i.*,u.nombre unidad_nombre FROM inventario_items i
+                    LEFT JOIN unidades_medida u ON u.id=i.unidad_medida_id
+                    WHERE i.id=? AND i.cliente_id=? AND i.activo=1""",(int(item_id),cid)).fetchone()
+                if not art:return jsonify({"error":"Uno de los artículos no existe o está inactivo."}),400
+                qty=float(item.get("cantidad",0) or 0); price=float(item.get("precio_unitario",0) or 0)
+                if qty<=0:return jsonify({"error":"La cantidad debe ser mayor que cero."}),400
+                iva=float(item.get("iva_tasa",art["tipo_iva"] if "tipo_iva" in art.keys() else 10) or 0)
+                desc=float(item.get("descuento",0) or 0)
+                base=max(0,qty*price-desc); total+=base
+                c_line=item.get("centro_costo_id") or centro
+                if c_line and not conn.execute("SELECT id FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(c_line),cid)).fetchone():
+                    return jsonify({"error":"El centro de costo de una línea no existe o está inactivo."}),400
+                dep=item.get("deposito_id") or None
+                if dep and not conn.execute("SELECT id FROM depositos_inventario WHERE id=? AND cliente_id=? AND activo=1",(int(dep),cid)).fetchone():
+                    return jsonify({"error":"El depósito seleccionado no existe o está inactivo."}),400
+                conn.execute("""INSERT INTO ordenes_compra_detalle(orden_id,item_id,centro_costo_id,deposito_id,descripcion,unidad_medida,cantidad,cantidad_recibida,precio_unitario,iva_tasa,descuento,subtotal)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(oid,int(item_id),c_line,dep,art["nombre"],art["unidad_nombre"] or "",qty,0,price,iva,desc,base))
+            conn.execute("UPDATE ordenes_compra SET total=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",(total,oid,cid))
+            conn.commit();return jsonify({"id":oid,"numero":numero}),201
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.patch("/api/compras/ordenes/<int:orden_id>")
+    @staff_required
+    def actualizar_orden_compra(orden_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            oc=conn.execute("SELECT * FROM ordenes_compra WHERE id=? AND cliente_id=?",(orden_id,cid)).fetchone()
+            if not oc:return jsonify({"error":"Orden de compra no encontrada."}),404
+            if d.get("estado") is not None:
+                estado=d.get("estado")
+                if estado not in ESTADOS_OC:return jsonify({"error":"Estado de OC inválido."}),400
+                conn.execute("UPDATE ordenes_compra SET estado=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",(estado,orden_id,cid))
+            if d.get("cantidad_recibida") is not None:
+                for x in d.get("detalle") or []:
+                    did=x.get("detalle_id"); rec=x.get("cantidad_recibida")
+                    if did is None: continue
+                    row=conn.execute("SELECT cantidad FROM ordenes_compra_detalle WHERE id=? AND orden_id=?",(int(did),orden_id)).fetchone()
+                    if not row: continue
+                    rec=float(rec or 0)
+                    if rec<0 or rec>float(row["cantidad"]): return jsonify({"error":"La cantidad recibida no puede ser negativa ni superar la cantidad pedida."}),400
+                    conn.execute("UPDATE ordenes_compra_detalle SET cantidad_recibida=? WHERE id=? AND orden_id=?",(rec,int(did),orden_id))
+                pendientes=conn.execute("SELECT COUNT(*) n FROM ordenes_compra_detalle WHERE orden_id=? AND cantidad_recibida<cantidad",(orden_id,)).fetchone()["n"]
+                recibidas=conn.execute("SELECT COUNT(*) n FROM ordenes_compra_detalle WHERE orden_id=? AND cantidad_recibida>=cantidad",(orden_id,)).fetchone()["n"]
+                estado="recibida" if pendientes==0 and recibidas>0 else ("parcialmente_recibida" if recibidas>0 else oc["estado"])
+                conn.execute("UPDATE ordenes_compra SET estado=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=?",(estado,orden_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
         finally: conn.close()
 
     @app.post("/api/compras/comprobantes/<int:comp_id>/estado")
