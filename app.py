@@ -30,6 +30,7 @@ except ImportError:
 from flask import Flask, request, jsonify, send_from_directory
 from erp_modulos import stock_suficiente_para_venta, registrar_salida_venta
 from sifen_consulta import consultar_cdc_sifen
+from sifen_publica import validar_cdc as validar_cdc_publica, extraer_cdc_de_qr, consulta_publica_info
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -3642,45 +3643,102 @@ def api_sifen_diagnostico():
 
 @app.route("/api/sifen/consulta-cdc", methods=["POST"])
 def api_sifen_consulta_cdc():
+    """
+    Consulta de DTE recibidos sin certificado digital.
+
+    Importante: la consulta pública de DNIT por CDC presenta reCAPTCHA.
+    Este endpoint NO intenta resolverlo ni evadirlo. Devuelve el mecanismo
+    oficial de verificación y aprovecha primero el caché de Kakuaa.
+
+    La consulta autenticada por WS sigue existiendo en /api/sifen/diagnostico
+    como herramienta administrativa opcional y continúa requiriendo certificado.
+    """
     cliente_id,error=obtener_cliente_contable()
     if error:return error
     data=request.get_json(silent=True) or {}
     cdc=str(data.get("cdc") or "").strip()
-    ambiente=str(data.get("ambiente") or os.environ.get("SIFEN_AMBIENTE","test")).strip().lower()
+
     try:
-        conn_cfg=get_db()
-        cfg=conn_cfg.execute("SELECT ambiente, activo, cert_path, key_path, ca_bundle FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
-        conn_cfg.close()
-        if not cfg or not cfg["activo"]:raise RuntimeError("SIFEN_CERT_PATH no está configurado para el cliente activo.")
-        resultado=consultar_cdc_sifen(cdc, ambiente=cfg["ambiente"], cert_path=cfg["cert_path"], key_path=cfg["key_path"], ca_bundle=cfg["ca_bundle"] or None)
-        if resultado.get("codigo") == "0421":
-            return jsonify({"error":resultado.get("mensaje") or "El certificado no tiene permiso para consultar este DE.","sifen":resultado}),403
-        if resultado.get("codigo") == "0420":
-            return jsonify({"error":"El CDC no fue encontrado en SIFEN.","sifen":resultado}),404
-        if not resultado.get("ok"):
-            return jsonify({"error":resultado.get("mensaje") or "SIFEN no pudo completar la consulta.","sifen":resultado}),502
-        if resultado.get("ok") and resultado.get("xml_de"):
-            try:
-                dte=_parse_dte_xml(resultado["xml_de"])
-                _guardar_dte_cache(cliente_id,dte,resultado["xml_de"],"SIFEN_WS",resultado.get("codigo",""))
-            except Exception:
-                app.logger.exception("No se pudo guardar el DTE consultado en SIFEN")
-        return jsonify(resultado),200
-    except ValueError as exc:
+        cdc=validar_cdc_publica(cdc)
+    except Exception as exc:
         return jsonify({"error":str(exc)}),400
-    except RuntimeError as exc:
-        mensaje=str(exc)
-        if "SIFEN_CERT_PATH" in mensaje or "SIFEN_KEY_PATH" in mensaje:
-            return jsonify({
-                "public_only":True,
-                "cdc":cdc,
-                "public_url":"https://ekuatia.set.gov.py/consultas/",
-                "mensaje":"La consulta WS SIFEN requiere certificado digital. Para un uso libre, utilizá la consulta pública DNIT o importá el XML del DTE."
-            }),200
-        return jsonify({"error":mensaje}),502
-    except Exception:
-        app.logger.exception("Error inesperado consultando SIFEN por CDC")
-        return jsonify({"error":"No se pudo completar la consulta SIFEN."}),500
+
+    # 1) Caché primero: si Kakuaa ya consultó/importó este DTE, no hacemos
+    # ninguna llamada externa ni exigimos certificado.
+    conn=get_db()
+    try:
+        fila=conn.execute(
+            "SELECT * FROM documentos_electronicos_cache WHERE cliente_id=? AND cdc=?",
+            (cliente_id,cdc)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if fila:
+        return jsonify({
+            "ok":True,
+            "fuente":fila["fuente"],
+            "cache":True,
+            "cdc":cdc,
+            "documento":dict(fila),
+            "xml_de":fila["xml_original"],
+        }),200
+
+    # 2) No hacemos scraping, no resolvemos CAPTCHA y no enviamos el CDC
+    # a servicios de terceros. Solo generamos el enlace oficial de DNIT.
+    info=consulta_publica_info(cdc)
+    return jsonify({
+        "ok":False,
+        "cache":False,
+        **info,
+    }),200
+
+
+@app.route("/api/sifen/consulta-qr", methods=["POST"])
+def api_sifen_consulta_qr():
+    """
+    Extrae el CDC de un QR oficial de e-Kuatia y pasa por el mismo flujo
+    público sin certificado. No sigue URLs arbitrarias ni intenta resolver
+    CAPTCHA.
+    """
+    data=request.get_json(silent=True) or {}
+    qr=str(data.get("qr") or "").strip()
+    try:
+        cdc=extraer_cdc_de_qr(qr)
+    except Exception as exc:
+        return jsonify({"error":str(exc)}),400
+
+    # Reutilizamos exactamente el flujo de CDC: caché primero y, si no existe,
+    # enlace oficial de verificación pública.
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+
+    conn=get_db()
+    try:
+        fila=conn.execute(
+            "SELECT * FROM documentos_electronicos_cache WHERE cliente_id=? AND cdc=?",
+            (cliente_id,cdc)
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if fila:
+        return jsonify({
+            "ok":True,
+            "fuente":fila["fuente"],
+            "cache":True,
+            "cdc":cdc,
+            "documento":dict(fila),
+            "xml_de":fila["xml_original"],
+        }),200
+
+    info=consulta_publica_info(cdc)
+    info["qr_recibido"]=True
+    return jsonify({
+        "ok":False,
+        "cache":False,
+        **info,
+    }),200
 
 if __name__ == "__main__":
 
