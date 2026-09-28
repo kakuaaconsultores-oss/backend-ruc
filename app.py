@@ -3580,8 +3580,8 @@ def api_sifen_config_get():
     try:
         row=conn.execute("SELECT ambiente, activo, cert_path, key_path, ca_bundle FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
         cliente=conn.execute("SELECT ruc, razon_social FROM clientes WHERE id=?",(cliente_id,)).fetchone()
-        if not row:return jsonify({"configurado":False,"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":"test","activo":False,"certificado_configurado":False,"clave_configurada":False}),200
-        return jsonify({"configurado":bool(row["activo"] and row["cert_path"] and row["key_path"]),"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":row["ambiente"],"activo":bool(row["activo"]),"certificado_configurado":bool(row["cert_path"]),"clave_configurada":bool(row["key_path"])}),200
+        if not row:return jsonify({"configurado":False,"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":"test","activo":False,"certificado_configurado":False,"clave_configurada":False,"modo_consulta":"PUBLICO_SIN_CERTIFICADO"}),200
+        return jsonify({"configurado":bool(row["activo"]),"cliente_id":cliente_id,"ruc":cliente["ruc"] if cliente else "","razon_social":cliente["razon_social"] if cliente else "","ambiente":row["ambiente"],"activo":bool(row["activo"]),"certificado_configurado":bool(row["cert_path"]),"clave_configurada":bool(row["key_path"]),"modo_consulta":"PUBLICO_SIN_CERTIFICADO"}),200
     finally:conn.close()
 
 @app.route("/api/sifen/configuracion", methods=["PUT"])
@@ -3597,7 +3597,7 @@ def api_sifen_config_put():
     cert_path=str(data.get("cert_path") or "").strip()
     key_path=str(data.get("key_path") or "").strip()
     ca_bundle=str(data.get("ca_bundle") or "").strip()
-    if activo and (not cert_path or not key_path):return jsonify({"error":"Para activar SIFEN debés indicar certificado y clave privada en el servidor."}),400
+    # El modo normal de consulta pública NO requiere certificado ni clave privada.\n    # Los campos de certificado quedan reservados exclusivamente para WS administrativos.\n
     conn=get_db()
     try:
         row=conn.execute("SELECT id FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
