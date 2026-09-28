@@ -3514,7 +3514,7 @@ def _guardar_dte_cache(cliente_id, dte, xml_text, fuente="XML", codigo_respuesta
         estado="vigente" if codigo_respuesta in ("","0422") else codigo_respuesta
         vals=(dte["fecha_emision"],dte["ruc_emisor"],dte["razon_social_emisor"],dte["ruc_receptor"],dte["razon_social_receptor"],dte["moneda"],dte["total"],dte["total_iva"],dte["timbrado"],dte["establecimiento"],dte["punto_expedicion"],dte["numero_documento"],codigo_respuesta,estado,fuente,xml_text)
         if fila:
-            conn.execute("""UPDATE documentos_electronicos_cache SET fecha_emision=?,ruc_emisor=?,razon_social_emisor=?,ruc_receptor=?,razon_social_receptor=?,moneda=?,total=?,total_iva=?,timbrado=?,establecimiento=?,punto_expedicion=?,numero_documento=?,codigo_respuesta=?,estado=?,fuente=?,xml_original=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=?""",vals+(fila["id"],))
+            conn.execute("""UPDATE documentos_electronicos_cache SET fecha_emision=?,ruc_emisor=?,razon_social_emisor=?,ruc_receptor=?,razon_social_receptor=?,moneda=?,total=?,total_iva=?,timbrado=?,establecimiento=?,punto_expedicion=?,numero_documento=?,codigo_respuesta=?,estado=?,fuente=?,xml_original=?,actualizado_en=? WHERE id=?""",vals+(datetime.utcnow().isoformat(),fila["id"]))
         else:
             conn.execute("""INSERT INTO documentos_electronicos_cache (cliente_id,cdc,fecha_emision,ruc_emisor,razon_social_emisor,ruc_receptor,razon_social_receptor,moneda,total,total_iva,timbrado,establecimiento,punto_expedicion,numero_documento,codigo_respuesta,estado,fuente,xml_original) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(cliente_id,dte["cdc"],*vals))
         conn.commit()
