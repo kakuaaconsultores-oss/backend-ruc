@@ -685,6 +685,25 @@ def init_sifen_cache_db():
 
 init_sifen_cache_db()
 
+def init_sifen_config_db():
+    conn = get_db()
+    try:
+        id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "datetime('now')"
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS sifen_configuracion (
+            id {id_type}, cliente_id INTEGER NOT NULL,
+            ambiente TEXT NOT NULL DEFAULT 'test', activo INTEGER NOT NULL DEFAULT 0,
+            cert_path TEXT DEFAULT '', key_path TEXT DEFAULT '', ca_bundle TEXT DEFAULT '',
+            creado_en TEXT DEFAULT {now_default}, actualizado_en TEXT DEFAULT {now_default},
+            UNIQUE(cliente_id)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sifen_config_cliente ON sifen_configuracion(cliente_id, activo)")
+        conn.commit()
+    finally:
+        conn.close()
+
+init_sifen_config_db()
+
 def insertar_y_obtener_id(conn, sql, params=()):
     if DB_BACKEND == "postgres":
         row = conn.execute(_adapt_postgres_sql(sql).rstrip().rstrip(";") + " RETURNING id", params).fetchone()
