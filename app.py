@@ -3456,7 +3456,15 @@ def api_sifen_consulta_cdc():
     except ValueError as exc:
         return jsonify({"error":str(exc)}),400
     except RuntimeError as exc:
-        return jsonify({"error":str(exc)}),502
+        mensaje=str(exc)
+        if "SIFEN_CERT_PATH" in mensaje or "SIFEN_KEY_PATH" in mensaje:
+            return jsonify({
+                "public_only":True,
+                "cdc":cdc,
+                "public_url":"https://ekuatia.set.gov.py/consultas/",
+                "mensaje":"La consulta WS SIFEN requiere certificado digital. Para un uso libre, utilizá la consulta pública DNIT o importá el XML del DTE."
+            }),200
+        return jsonify({"error":mensaje}),502
     except Exception:
         app.logger.exception("Error inesperado consultando SIFEN por CDC")
         return jsonify({"error":"No se pudo completar la consulta SIFEN."}),500
