@@ -3613,7 +3613,11 @@ def api_sifen_consulta_cdc():
     cdc=str(data.get("cdc") or "").strip()
     ambiente=str(data.get("ambiente") or os.environ.get("SIFEN_AMBIENTE","test")).strip().lower()
     try:
-        resultado=consultar_cdc_sifen(cdc, ambiente=ambiente)
+        conn_cfg=get_db()
+        cfg=conn_cfg.execute("SELECT ambiente, activo, cert_path, key_path, ca_bundle FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
+        conn_cfg.close()
+        if not cfg or not cfg["activo"]:raise RuntimeError("SIFEN_CERT_PATH no está configurado para el cliente activo.")
+        resultado=consultar_cdc_sifen(cdc, ambiente=cfg["ambiente"], cert_path=cfg["cert_path"], key_path=cfg["key_path"], ca_bundle=cfg["ca_bundle"] or None)
         if resultado.get("codigo") == "0421":
             return jsonify({"error":resultado.get("mensaje") or "El certificado no tiene permiso para consultar este DE.","sifen":resultado}),403
         if resultado.get("codigo") == "0420":
