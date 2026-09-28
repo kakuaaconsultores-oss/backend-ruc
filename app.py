@@ -3605,6 +3605,41 @@ def api_sifen_config_put():
         conn.commit()
     finally:conn.close()
     return api_sifen_config_get()
+@app.route("/api/sifen/diagnostico", methods=["POST"])
+@admin_required
+def api_sifen_diagnostico():
+    """Prueba la conexión WS Consulta DE para el cliente activo sin enviar el CDC a ningún sitio externo."""
+    cliente_id,error=obtener_cliente_contable()
+    if error:return error
+    data=request.get_json(silent=True) or {}
+    cdc=str(data.get("cdc") or "").strip()
+    try:
+        cdc=validar_cdc(cdc)
+    except Exception as exc:
+        return jsonify({"ok":False,"etapa":"cdc","error":str(exc)}),400
+    conn=get_db()
+    try:
+        cfg=conn.execute("SELECT ambiente,activo,cert_path,key_path,ca_bundle FROM sifen_configuracion WHERE cliente_id=?",(cliente_id,)).fetchone()
+        cliente=conn.execute("SELECT ruc,razon_social FROM clientes WHERE id=?",(cliente_id,)).fetchone()
+    finally:conn.close()
+    if not cfg:
+        return jsonify({"ok":False,"etapa":"configuracion","error":"Este cliente todavía no tiene configuración SIFEN.","cliente_ruc":cliente["ruc"] if cliente else ""}),400
+    if not cfg["activo"]:
+        return jsonify({"ok":False,"etapa":"configuracion","error":"La conexión SIFEN está inactiva para este cliente."}),400
+    cert_path=str(cfg["cert_path"] or "").strip(); key_path=str(cfg["key_path"] or "").strip()
+    if not cert_path or not key_path:
+        return jsonify({"ok":False,"etapa":"certificado","error":"Faltan certificado digital y/o clave privada en la configuración SIFEN."}),400
+    if not os.path.isfile(cert_path):
+        return jsonify({"ok":False,"etapa":"certificado","error":"No existe el archivo de certificado configurado en el servidor.","cert_path":cert_path}),400
+    if not os.path.isfile(key_path):
+        return jsonify({"ok":False,"etapa":"certificado","error":"No existe el archivo de clave privada configurado en el servidor.","key_path":key_path}),400
+    try:
+        resultado=consultar_cdc_sifen(cdc,ambiente=cfg["ambiente"],cert_path=cert_path,key_path=key_path,ca_bundle=cfg["ca_bundle"] or None)
+        return jsonify({"ok":bool(resultado.get("ok")),"etapa":"sifen","cliente_ruc":cliente["ruc"] if cliente else "", "resultado":resultado}),200
+    except Exception as exc:
+        app.logger.exception("Diagnóstico SIFEN fallido")
+        return jsonify({"ok":False,"etapa":"conexion","error":str(exc)}),502
+
 @app.route("/api/sifen/consulta-cdc", methods=["POST"])
 def api_sifen_consulta_cdc():
     cliente_id,error=obtener_cliente_contable()
