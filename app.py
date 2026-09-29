@@ -3549,7 +3549,7 @@ def api_dte_cache(cdc):
     conn=get_db()
     try:
         fila=conn.execute("SELECT * FROM documentos_electronicos_cache WHERE cliente_id=? AND cdc=?",(cliente_id,cdc)).fetchone()
-        if not fila:return jsonify({"found":False,"cdc":cdc}),404
+        if not fila:return jsonify({"found":False,"cdc":cdc}),200
         return jsonify({"found":True,"fuente":fila["fuente"],"documento":dict(fila),"xml_de":fila["xml_original"]}),200
     finally:conn.close()
 
@@ -3687,11 +3687,18 @@ def api_sifen_consulta_cdc():
     # 2) No hacemos scraping, no resolvemos CAPTCHA y no enviamos el CDC
     # a servicios de terceros. Solo generamos el enlace oficial de DNIT.
     info=consulta_publica_info(cdc)
-    return jsonify({
-        "ok":False,
+    # Si la consulta automática (ConsultaMe Factura o, en el futuro,
+    # SIFEN con el .p12 de KAKUAA) devolvió el DTE, marcamos la respuesta
+    # como exitosa para que el frontend pueda normalizarla y estirarla
+    # directamente a Compras. Si solo tenemos el enlace público de DNIT,
+    # conservamos ok=False/public_only=True.
+    automatico=bool(info.get("automatico_desde_backend")) and not bool(info.get("public_only"))
+    respuesta={
+        "ok": automatico,
         "cache":False,
         **info,
-    }),200
+    }
+    return jsonify(respuesta),200
 
 
 @app.route("/api/sifen/consulta-qr", methods=["POST"])
