@@ -80,11 +80,22 @@ def _consulta_factura_externa(cdc):
     # Algunas versiones del servicio envuelven el DTE dentro de data/document/result.
     # Normalizamos sin depender de una única forma de respuesta.
     candidato = payload
-    for clave in ("data", "document", "documento", "result", "resultado"):
-        valor = payload.get(clave) if isinstance(payload, dict) else None
-        if isinstance(valor, dict):
-            candidato = {**payload, **valor}
+    # El proveedor puede envolver el DTE en varios niveles o devolver data como lista.
+    for _ in range(4):
+        if not isinstance(candidato, dict):
             break
+        siguiente = None
+        for clave in ("data", "document", "documento", "result", "resultado"):
+            valor = candidato.get(clave)
+            if isinstance(valor, dict):
+                siguiente = valor
+                break
+            if isinstance(valor, list) and valor and isinstance(valor[0], dict):
+                siguiente = valor[0]
+                break
+        if not siguiente:
+            break
+        candidato = {**candidato, **siguiente}
     payload = candidato
     payload.setdefault("cdc", payload.get("CDC") or payload.get("cDc") or cdc)
     payload["fuente"] = "CONSULTA_FACTURA_API"
