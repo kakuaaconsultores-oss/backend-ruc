@@ -77,7 +77,16 @@ def _consulta_factura_externa(cdc):
         return {"ok": False, "estado": "NO_ENCONTRADO" if response.status_code == 404 else "ERROR_PROVEEDOR", "mensaje": mensaje or f"ConsultaMe Factura respondió HTTP {response.status_code}", "proveedor_http": response.status_code}
     if not isinstance(payload, dict):
         return {"ok": False, "estado": "RESPUESTA_INVALIDA", "mensaje": "El proveedor externo no devolvió un objeto JSON."}
-    payload.setdefault("cdc", cdc)
+    # Algunas versiones del servicio envuelven el DTE dentro de data/document/result.
+    # Normalizamos sin depender de una única forma de respuesta.
+    candidato = payload
+    for clave in ("data", "document", "documento", "result", "resultado"):
+        valor = payload.get(clave) if isinstance(payload, dict) else None
+        if isinstance(valor, dict):
+            candidato = {**payload, **valor}
+            break
+    payload = candidato
+    payload.setdefault("cdc", payload.get("CDC") or payload.get("cDc") or cdc)
     payload["fuente"] = "CONSULTA_FACTURA_API"
     payload["proveedor"] = "consultame-factura"
     payload["proveedor_url"] = url
