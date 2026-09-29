@@ -3,7 +3,7 @@ import re
 import requests
 from urllib.parse import urlparse, parse_qs, unquote
 
-CONSULTA_FACTURA_BASE = os.environ.get("CONSULTA_FACTURA_BASE", "https://consultame-factura-9pu85.ondigitalocean.app").rstrip("/")
+CONSULTA_FACTURA_BASE = os.environ.get("CONSULTA_FACTURA_BASE", "https://ms-consultama-back-4w4qx.ondigitalocean.app").rstrip("/")
 CONSULTA_FACTURA_DOCUMENT_PATH = "/v1/sifen/document/{cdc}"
 
 DNIT_PUBLIC_HOSTS = {"ekuatia.set.gov.py", "www.ekuatia.set.gov.py"}
