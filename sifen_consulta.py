@@ -4,6 +4,12 @@ import time
 import json
 import xml.etree.ElementTree as ET
 import requests
+import tempfile
+
+try:
+    from cryptography.hazmat.primitives.serialization import pkcs12, Encoding, PrivateFormat, NoEncryption
+except ImportError:
+    pkcs12 = None
 
 SIFEN_NS = "http://ekuatia.set.gov.py/sifen/xsd"
 SOAP_NS = "http://www.w3.org/2003/05/soap-envelope"
@@ -229,7 +235,7 @@ def _parse_dte(root):
         "items": detalleFactura,
     }
 
-def consultar_cdc_sifen(cdc, ambiente=None, cert_path=None, key_path=None, ca_bundle=None):
+def consultar_cdc_sifen(cdc, ambiente=None, cert_path=None, key_path=None, ca_bundle=None, p12_path=None, p12_password=None):
     """
     Consulta oficial SIFEN por CDC mediante WS Consulta DE (siConsDE).
     Requiere certificado digital de cliente con autenticación TLS mutua.
@@ -243,11 +249,37 @@ def consultar_cdc_sifen(cdc, ambiente=None, cert_path=None, key_path=None, ca_bu
 
     cert_path = str(cert_path or os.environ.get("SIFEN_CERT_PATH", "")).strip()
     key_path = str(key_path or os.environ.get("SIFEN_KEY_PATH", "")).strip()
+    p12_path = str(p12_path or os.environ.get("SIFEN_P12_PATH", "") or os.environ.get("KAKUAA_SIFEN_P12_PATH", "")).strip()
+    p12_password = p12_password if p12_password is not None else os.environ.get("SIFEN_P12_PASSWORD", "")
     ca_bundle = str(ca_bundle or os.environ.get("SIFEN_CA_BUNDLE", "")).strip() or True
+
+    temporales = []
+    if p12_path and not cert_path and not key_path:
+        if pkcs12 is None:
+            raise RuntimeError("Para usar el certificado .p12 de KAKUAA se requiere la dependencia cryptography.")
+        if not os.path.isfile(p12_path):
+            raise RuntimeError(f"No existe el archivo .p12 configurado: {p12_path}")
+        try:
+            with open(p12_path, "rb") as fh:
+                contenido = fh.read()
+            password_bytes = str(p12_password or "").encode("utf-8")
+            private_key, certificate, _ = pkcs12.load_key_and_certificates(contenido, password_bytes)
+            if private_key is None or certificate is None:
+                raise RuntimeError("El .p12 no contiene simultáneamente certificado y clave privada.")
+            cert_tmp = tempfile.NamedTemporaryFile(prefix="kakuaa-sifen-", suffix=".pem", delete=False)
+            key_tmp = tempfile.NamedTemporaryFile(prefix="kakuaa-sifen-", suffix=".pem", delete=False)
+            cert_tmp.write(certificate.public_bytes(Encoding.PEM))
+            cert_tmp.close()
+            key_tmp.write(private_key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption()))
+            key_tmp.close()
+            cert_path, key_path = cert_tmp.name, key_tmp.name
+            temporales.extend([cert_path, key_path])
+        except Exception as exc:
+            raise RuntimeError(f"No se pudo abrir el certificado .p12 de KAKUAA: {exc}") from exc
+
     if not cert_path or not key_path:
         raise RuntimeError(
-            "La consulta SIFEN requiere configurar SIFEN_CERT_PATH y SIFEN_KEY_PATH "
-            "con un certificado digital de cliente y su clave privada."
+            "La consulta SIFEN requiere el .p12 de KAKUAA o configurar SIFEN_CERT_PATH y SIFEN_KEY_PATH."
         )
 
     d_id = str(time.time_ns() // 1_000_000)[-14:]
@@ -279,6 +311,12 @@ def consultar_cdc_sifen(cdc, ambiente=None, cert_path=None, key_path=None, ca_bu
         )
     except requests.RequestException as exc:
         raise RuntimeError(f"No se pudo conectar con SIFEN: {exc}") from exc
+    finally:
+        for temporal in temporales:
+            try:
+                os.remove(temporal)
+            except OSError:
+                pass
 
     if response.status_code >= 400:
         raise RuntimeError(
