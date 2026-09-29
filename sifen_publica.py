@@ -77,26 +77,50 @@ def _consulta_factura_externa(cdc):
         return {"ok": False, "estado": "NO_ENCONTRADO" if response.status_code == 404 else "ERROR_PROVEEDOR", "mensaje": mensaje or f"ConsultaMe Factura respondió HTTP {response.status_code}", "proveedor_http": response.status_code}
     if not isinstance(payload, dict):
         return {"ok": False, "estado": "RESPUESTA_INVALIDA", "mensaje": "El proveedor externo no devolvió un objeto JSON."}
-    # Algunas versiones del servicio envuelven el DTE dentro de data/document/result.
-    # Normalizamos sin depender de una única forma de respuesta.
+    # Algunas versiones del servicio envuelven el DTE dentro de data/document/result,
+    # y algunas devuelven ese contenido como JSON serializado en un string.
+    # Normalizamos de forma recursiva para no depender de una única forma de respuesta.
+    def _json_obj(valor):
+        if not isinstance(valor, str):
+            return valor
+        texto = valor.strip()
+        if not texto or texto[0] not in "{[":
+            return valor
+        try:
+            import json
+            return json.loads(texto)
+        except Exception:
+            return valor
+
     candidato = payload
-    # El proveedor puede envolver el DTE en varios niveles o devolver data como lista.
-    for _ in range(4):
+    for _ in range(8):
+        candidato = _json_obj(candidato)
+        if isinstance(candidato, list):
+            candidato = _json_obj(candidato[0]) if candidato else {}
         if not isinstance(candidato, dict):
             break
         siguiente = None
-        for clave in ("data", "document", "documento", "result", "resultado"):
-            valor = candidato.get(clave)
+        for clave in ("data", "document", "documento", "result", "resultado", "response", "respuesta"):
+            valor = _json_obj(candidato.get(clave))
             if isinstance(valor, dict):
                 siguiente = valor
                 break
-            if isinstance(valor, list) and valor and isinstance(valor[0], dict):
-                siguiente = valor[0]
+            if isinstance(valor, list) and valor and isinstance(_json_obj(valor[0]), dict):
+                siguiente = _json_obj(valor[0])
                 break
         if not siguiente:
             break
         candidato = {**candidato, **siguiente}
-    payload = candidato
+    payload = candidato if isinstance(candidato, dict) else {"raw": candidato}
+
+    # Diagnóstico no sensible: permite saber desde el frontend si el proveedor
+    # entregó un objeto DTE o solo un envoltorio/error.
+    payload.setdefault("_kakuaa_diagnostico", {})
+    payload["_kakuaa_diagnostico"]["claves_proveedor"] = [str(k) for k in payload.keys() if not str(k).startswith("_")]
+    payload["_kakuaa_diagnostico"]["tiene_dte"] = bool(
+        payload.get("xml_de") or payload.get("xml") or payload.get("CDC") or payload.get("cdc") or
+        payload.get("emisor") or payload.get("detalleFactura") or payload.get("items") or payload.get("documento")
+    )
     payload.setdefault("cdc", payload.get("CDC") or payload.get("cDc") or cdc)
     payload["fuente"] = "CONSULTA_FACTURA_API"
     payload["proveedor"] = "consultame-factura"
