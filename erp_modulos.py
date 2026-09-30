@@ -250,7 +250,7 @@ def registrar_ingreso_compra(conn, cliente_id, comprobante_id, detalle, usuario_
     item_id=detalle.get("item_id")
     concepto_id=detalle.get("concepto_id")
     if item_id:
-        item=_find_inventory_item(conn,cliente_id,articulo_id=int(item_id))
+        item=conn.execute("SELECT * FROM inventario_items WHERE id=? AND cliente_id=? AND activo=1 LIMIT 1",(int(item_id),cliente_id)).fetchone()
         if not item or not int(item["inventariable"] or 0): return
         ya=conn.execute("SELECT 1 FROM inventario_movimientos WHERE referencia_tipo='COMPROBANTE_COMPRA' AND referencia_id=? AND item_id=? LIMIT 1",(comprobante_id,int(item["id"]))).fetchone()
         if ya:return
