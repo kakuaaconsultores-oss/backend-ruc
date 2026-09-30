@@ -245,25 +245,31 @@ def registrar_salida_venta(conn, cliente_id, articulo_id, cantidad, factura_id, 
         VALUES(?,?,?,?,?,?,?,?,?,?)""",(cliente_id,item["id"],dep,fecha,"SALIDA_VENTA",-float(cantidad),costo,"FACTURA_VENTA",factura_id,usuario_id))
 
 def registrar_ingreso_compra(conn, cliente_id, comprobante_id, detalle, usuario_id=None, fecha=None):
-    """Entrada automática de stock desde una factura de compra. Solo procesa conceptos vinculados/inventariables."""
+    """Entrada de stock desde una factura. Prioriza el artículo maestro de Inventarios; conserva compatibilidad con conceptos antiguos."""
     fecha=fecha or datetime.utcnow().strftime("%Y-%m-%d")
+    item_id=detalle.get("item_id")
     concepto_id=detalle.get("concepto_id")
-    if not concepto_id:return
-    if conn.execute("SELECT 1 FROM inventario_movimientos WHERE referencia_tipo='COMPROBANTE_COMPRA' AND referencia_id=? AND item_id IN (SELECT id FROM inventario_items WHERE concepto_compra_id=?) LIMIT 1",(comprobante_id,int(concepto_id))).fetchone():
-        return
-    item=_find_inventory_item(conn,cliente_id,concepto_id=int(concepto_id))
-    if not item:
-        concepto=conn.execute("SELECT * FROM conceptos_compra WHERE id=? AND cliente_id=? AND activo=1",(int(concepto_id),cliente_id)).fetchone()
-        if not concepto or str(concepto["tipo"] or "").lower() in ("servicio","gasto"): return
-        codigo=str(concepto["codigo"])
-        item_id=_insert_id(conn,"""INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,unidad_medida_id,inventariable,stock_minimo,activo)
-            VALUES(?,?,?,?,?,1,?,1)""",(cliente_id,codigo,concepto["nombre"],concepto["id"],concepto["unidad_medida_id"],float(concepto["stock_minimo"] or 0)))
-        item=conn.execute("SELECT * FROM inventario_items WHERE id=?",(item_id,)).fetchone()
-        # Vinculación automática por código con el artículo de ventas, si existe.
-        venta=conn.execute("SELECT id FROM articulos WHERE codigo=? LIMIT 1",(codigo,)).fetchone()
-        if venta:
-            conn.execute("UPDATE inventario_items SET articulo_venta_id=? WHERE id=?",(venta["id"],item_id))
-    dep=_get_principal_deposito(conn,cliente_id)
+    if item_id:
+        item=_find_inventory_item(conn,cliente_id,articulo_id=int(item_id))
+        if not item or not int(item["inventariable"] or 0): return
+        ya=conn.execute("SELECT 1 FROM inventario_movimientos WHERE referencia_tipo='COMPROBANTE_COMPRA' AND referencia_id=? AND item_id=? LIMIT 1",(comprobante_id,int(item["id"]))).fetchone()
+        if ya:return
+    else:
+        if not concepto_id:return
+        ya=conn.execute("SELECT 1 FROM inventario_movimientos WHERE referencia_tipo='COMPROBANTE_COMPRA' AND referencia_id=? AND item_id IN (SELECT id FROM inventario_items WHERE concepto_compra_id=?) LIMIT 1",(comprobante_id,int(concepto_id))).fetchone()
+        if ya:return
+        item=_find_inventory_item(conn,cliente_id,concepto_id=int(concepto_id))
+        if not item:
+            concepto=conn.execute("SELECT * FROM conceptos_compra WHERE id=? AND cliente_id=? AND activo=1",(int(concepto_id),cliente_id)).fetchone()
+            if not concepto or str(concepto["tipo"] or "").lower() in ("servicio","gasto"): return
+            codigo=str(concepto["codigo"])
+            item_id_new=_insert_id(conn,"""INSERT INTO inventario_items(cliente_id,codigo,nombre,concepto_compra_id,unidad_medida_id,inventariable,stock_minimo,activo)
+                VALUES(?,?,?,?,?,1,?,1)""",(cliente_id,codigo,concepto["nombre"],concepto["id"],concepto["unidad_medida_id"],float(concepto["stock_minimo"] or 0)))
+            item=conn.execute("SELECT * FROM inventario_items WHERE id=?",(item_id_new,)).fetchone()
+            venta=conn.execute("SELECT id FROM articulos WHERE codigo=? LIMIT 1",(codigo,)).fetchone()
+            if venta:
+                conn.execute("UPDATE inventario_items SET articulo_venta_id=? WHERE id=?",(venta["id"],item_id_new))
+    dep=int(detalle.get("deposito_id") or 0) or _get_principal_deposito(conn,cliente_id)
     cantidad=float(detalle.get("cantidad") or 0)
     costo=float(detalle.get("precio_unitario") or 0)
     if cantidad<=0:return
