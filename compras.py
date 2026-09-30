@@ -161,6 +161,10 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 cuenta_contable_id INTEGER DEFAULT NULL)""")
             if not _column_exists("comprobantes_compra_detalle", "centro_costo_id"):
                 conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN centro_costo_id INTEGER")
+            if not _column_exists("comprobantes_compra_detalle", "item_id"):
+                conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN item_id INTEGER")
+            if not _column_exists("comprobantes_compra_detalle", "deposito_id"):
+                conn.execute("ALTER TABLE comprobantes_compra_detalle ADD COLUMN deposito_id INTEGER")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS cuotas_compras (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, comprobante_id INTEGER NOT NULL,
                 numero_cuota INTEGER NOT NULL, fecha_vencimiento TEXT NOT NULL, importe REAL NOT NULL DEFAULT 0,
@@ -1113,11 +1117,20 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 centro_detalle=item.get("centro_costo_id") or centro_costo_id
                 if centro_detalle and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_detalle),cid)).fetchone():
                     return jsonify({"error":"El centro de costo de una línea no existe, pertenece a otra empresa o está inactivo."}),400
-                conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id,centro_costo_id) VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (cidc,concepto_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle,centro_detalle))
-                if concepto_id not in (None,"","null") and d.get("estado","registrado") not in ("borrador","anulado"):
+                item_id=item.get("item_id") or None
+                deposito_id=item.get("deposito_id") or None
+                if item_id:
+                    art=conn.execute("SELECT id,nombre,activo,inventariable FROM inventario_items WHERE id=? AND cliente_id=?",(int(item_id),cid)).fetchone()
+                    if not art or not int(art["activo"] or 0):
+                        return jsonify({"error":"El artículo de Inventarios seleccionado no existe o está inactivo."}),400
+                    if deposito_id and not conn.execute("SELECT id FROM depositos_inventario WHERE id=? AND cliente_id=? AND activo=1",(int(deposito_id),cid)).fetchone():
+                        return jsonify({"error":"El depósito seleccionado no existe o está inactivo."}),400
+                conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,item_id,deposito_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id,centro_costo_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (cidc,concepto_id,item_id,deposito_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle,centro_detalle))
+                if (concepto_id not in (None,"","null") or item_id) and d.get("estado","registrado") not in ("borrador","anulado"):
                     registrar_ingreso_compra(conn,cid,int(cidc),{
-                        "concepto_id":concepto_id,"cantidad":cantidad_item,"precio_unitario":precio_item
+                        "concepto_id":concepto_id,"item_id":item_id,"deposito_id":deposito_id,
+                        "cantidad":cantidad_item,"precio_unitario":precio_item
                     },usuario_id=None,fecha=d.get("fecha"))
             conn.commit(); return jsonify({"id":cidc}),201
         except Exception as e:
