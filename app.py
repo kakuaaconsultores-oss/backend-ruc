@@ -3420,7 +3420,7 @@ def descargar_formulario_renta(formato):
 # directamente de la API externa ni tenga problemas de CORS.
 @app.route("/api/ruc", methods=["GET"])
 def consultar_ruc():
-    ruc = str(request.args.get("ruc", "")).strip()
+    ruc = str(request.args.get("ruc", "")).strip().replace(" ", "")
     if not ruc:
         return jsonify({"error": "El RUC es obligatorio."}), 400
 
