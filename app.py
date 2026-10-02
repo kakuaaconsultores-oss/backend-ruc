@@ -3485,7 +3485,7 @@ def _cargar_padron_ruc_dnit():
 
         enlaces = {}
         for digito in range(10):
-            patron = rf'href=["\']([^"\']*ruc{digito}\.zip[^"\']*)["\']'
+            patron = rf'href=["\\']([^"\\']*ruc{digito}\\.zip[^"\\']*)["\\']'
             encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
             if encontrados:
                 url = encontrados[-1]
@@ -3503,7 +3503,10 @@ def _cargar_padron_ruc_dnit():
             z = requests.get(
                 enlaces[digito],
                 timeout=45,
-                headers={"Accept": "application/zip,application/octet-stream", "User-Agent": "Kakuaa-Consultores/1.0"},
+                headers={
+                    "Accept": "application/zip,application/octet-stream",
+                    "User-Agent": "Kakuaa-Consultores/1.0",
+                },
             )
             z.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(z.content)) as archivo_zip:
@@ -3512,16 +3515,16 @@ def _cargar_padron_ruc_dnit():
                     continue
                 with archivo_zip.open(txts[0]) as archivo_txt:
                     for raw in archivo_txt:
-                    linea = raw.decode("utf-8-sig", errors="replace").rstrip("\\r\\n")
-                    campos = linea.split("|")
-                    if len(campos) < 4:
-                        continue
-                    ruc = str(campos[0]).strip()
-                    nombre = str(campos[1]).strip()
-                    dv = str(campos[2]).strip()
-                    anterior = str(campos[3]).strip()
-                    if not ruc or not nombre or not dv:
-                        continue
+                        linea = raw.decode("utf-8-sig", errors="replace").rstrip("\\r\\n")
+                        campos = linea.split("|")
+                        if len(campos) < 4:
+                            continue
+                        ruc = str(campos[0]).strip()
+                        nombre = str(campos[1]).strip()
+                        dv = str(campos[2]).strip()
+                        anterior = str(campos[3]).strip()
+                        if not ruc or not nombre or not dv:
+                            continue
                         filas.append({
                             "ruc": ruc,
                             "razonSocial": nombre,
@@ -3540,6 +3543,7 @@ def _cargar_padron_ruc_dnit():
         with _DNIT_RUC_LOAD_LOCK:
             _DNIT_RUC_LOAD["status"] = "error"
             _DNIT_RUC_LOAD["error"] = str(exc)
+        print(f"[DNIT_RUC] Error preparando padrón: {exc}")
         raise
 
 
