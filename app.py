@@ -3582,25 +3582,34 @@ def _obtener_estado_dnit():
 
 
 def _dnit_parsear_linea(linea):
-    campos = linea.split("|")
+    campos = [str(x).strip() for x in linea.split("|")]
+
+    # El padrón publicado actualmente por la DNIT viene como:
+    # RUC | Razón Social | DV | RUC anterior | Estado | (campo final vacío)
+    # El campo final puede venir vacío, por lo que se elimina antes de
+    # interpretar las columnas. Se conserva la tolerancia a "|" dentro
+    # de la razón social.
+    while len(campos) > 4 and campos[-1] == "":
+        campos.pop()
+
     if len(campos) < 4:
         return None
 
-    # La estructura publicada actualmente es:
-    # RUC | Razón Social | Estado | DV | RUC anterior
-    # Se arma el nombre con los campos intermedios para tolerar nombres
-    # que contengan "|" sin escaparlo.
-    ruc = str(campos[0]).strip()
+    ruc = campos[0]
+
     if len(campos) >= 5:
-        dv = str(campos[-2]).strip()
-        anterior = str(campos[-1]).strip()
-        estado = str(campos[-3]).strip()
+        # Las tres últimas columnas son:
+        # RUC anterior | Estado
+        # La razón social ocupa todo lo que queda entre RUC y DV.
+        dv = campos[2]
+        anterior = campos[-2]
+        estado = campos[-1]
         nombre = "|".join(campos[1:-3]).strip()
     else:
         # Compatibilidad con snapshots antiguos de cuatro campos.
-        nombre = str(campos[1]).strip()
-        dv = str(campos[2]).strip()
-        anterior = str(campos[3]).strip()
+        nombre = campos[1]
+        dv = campos[2]
+        anterior = campos[3]
         estado = ""
 
     if not ruc or not nombre or not dv:
