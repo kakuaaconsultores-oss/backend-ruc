@@ -3567,7 +3567,7 @@ def _obtener_estado_dnit():
     conn = get_db()
     try:
         fila = conn.execute("""
-            SELECT estado, MAX(ultima_actualizacion) AS ultima_actualizacion
+            SELECT MAX(ultima_actualizacion) AS ultima_actualizacion
             FROM dnit_ruc_cache
         """).fetchone()
         if not fila or not fila["ultima_actualizacion"]:
