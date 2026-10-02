@@ -3458,7 +3458,7 @@ _DNIT_RUC_LOAD_LOCK = threading.Lock()
 def _normalizar_busqueda_dnit(valor):
     valor = unicodedata.normalize("NFKD", str(valor or ""))
     valor = "".join(ch for ch in valor if not unicodedata.combining(ch))
-    return re.sub(r"\\s+", " ", valor).strip().upper()
+    return re.sub(r"\s+", " ", valor).strip().upper()
 
 
 def _cargar_padron_ruc_dnit():
@@ -3485,7 +3485,7 @@ def _cargar_padron_ruc_dnit():
 
         enlaces = {}
         for digito in range(10):
-            patron = rf'href=["\\']([^"\\']*ruc{digito}\\.zip[^"\\']*)["\\']'
+            patron = rf"""href=["']([^"']*ruc{digito}\.zip[^"']*)["']"""
             encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
             if encontrados:
                 url = encontrados[-1]
@@ -3515,7 +3515,7 @@ def _cargar_padron_ruc_dnit():
                     continue
                 with archivo_zip.open(txts[0]) as archivo_txt:
                     for raw in archivo_txt:
-                        linea = raw.decode("utf-8-sig", errors="replace").rstrip("\\r\\n")
+                        linea = raw.decode("utf-8-sig", errors="replace").rstrip("\r\n")
                         campos = linea.split("|")
                         if len(campos) < 4:
                             continue
