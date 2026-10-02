@@ -3493,6 +3493,7 @@ def init_dnit_ruc_db():
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dnit_ruc_cache_nombre ON dnit_ruc_cache(nombre_normalizado)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_dnit_ruc_cache_estado ON dnit_ruc_cache(estado)")
+        # PostgreSQL necesita interpolar id_type antes de ejecutar este CREATE TABLE.
         conn.execute(f"""CREATE TABLE IF NOT EXISTS dnit_ruc_historial (
             id {id_type},
             ruc TEXT NOT NULL,
