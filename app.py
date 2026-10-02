@@ -190,6 +190,18 @@ CORS_ORIGINS.extend(
 )
 CORS(app, resources={r"/api/.*": {"origins": CORS_ORIGINS}}, supports_credentials=True, expose_headers=["Content-Disposition"])
 
+# Refuerzo de CORS para respuestas de error (404/500) y preflight OPTIONS.
+@app.after_request
+def _reforzar_cors(response):
+    origin = request.headers.get("Origin")
+    if origin and origin in CORS_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
+
 # Configuración SMTP (se lee de variables de entorno de Render)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
