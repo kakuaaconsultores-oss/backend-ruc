@@ -7,6 +7,9 @@ import secrets
 import hashlib
 import html
 import shutil
+import re
+import zipfile
+import unicodedata
 import requests
 import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
@@ -3443,42 +3446,112 @@ def consultar_ruc():
     except requests.RequestException:
         return jsonify({"error": "No se pudo conectar con el servicio de consulta de RUC."}), 502
 
-# Búsqueda pública de contribuyentes por nombre, apellido, razón social o documento.
-# TuRuc permite búsquedas flexibles y paginadas desde 3 caracteres.
+# Índice local temporal del padrón público de RUC de la DNIT.
+# La DNIT publica ruc0.zip ... ruc9.zip en su portal institucional.
+_DNIT_RUC_CACHE = {"loaded_at": 0, "rows": []}
+_DNIT_RUC_CACHE_TTL = int(os.environ.get("DNIT_RUC_CACHE_TTL", "86400"))
+
+
+def _normalizar_busqueda_dnit(valor):
+    valor = unicodedata.normalize("NFKD", str(valor or ""))
+    valor = "".join(ch for ch in valor if not unicodedata.combining(ch))
+    return re.sub(r"\\s+", " ", valor).strip().upper()
+
+
+def _cargar_padron_ruc_dnit():
+    ahora = time.time()
+    if _DNIT_RUC_CACHE["rows"] and ahora - _DNIT_RUC_CACHE["loaded_at"] < _DNIT_RUC_CACHE_TTL:
+        return _DNIT_RUC_CACHE["rows"]
+
+    portal = "https://www.dnit.gov.py/en/web/portal-institucional/listado-de-ruc-con-sus-equivalencias"
+    respuesta = requests.get(
+        portal,
+        timeout=20,
+        headers={"Accept": "text/html", "User-Agent": "Kakuaa-Consultores/1.0"},
+    )
+    respuesta.raise_for_status()
+
+    enlaces = {}
+    for digito in range(10):
+        patron = rf'href=["\\\\\']([^"\\\\\']*ruc{digito}\\\\.zip[^"\\\\\']*)["\\\\\']'
+        encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
+        if encontrados:
+            url = encontrados[-1]
+            if url.startswith("/"):
+                url = "https://www.dnit.gov.py" + url
+            elif not url.startswith("http"):
+                url = "https://www.dnit.gov.py/" + url.lstrip("/")
+            enlaces[digito] = url
+
+    if len(enlaces) < 10:
+        raise RuntimeError("La DNIT no publicó temporalmente todos los archivos del padrón RUC.")
+
+    filas = []
+    for digito in range(10):
+        z = requests.get(
+            enlaces[digito],
+            timeout=45,
+            headers={"Accept": "application/zip,application/octet-stream", "User-Agent": "Kakuaa-Consultores/1.0"},
+        )
+        z.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(z.content)) as archivo_zip:
+            txts = [n for n in archivo_zip.namelist() if n.lower().endswith(".txt")]
+            if not txts:
+                continue
+            with archivo_zip.open(txts[0]) as archivo_txt:
+                for raw in archivo_txt:
+                    linea = raw.decode("utf-8-sig", errors="replace").rstrip("\\r\\n")
+                    campos = linea.split("|")
+                    if len(campos) < 4:
+                        continue
+                    ruc = str(campos[0]).strip()
+                    nombre = str(campos[1]).strip()
+                    dv = str(campos[2]).strip()
+                    anterior = str(campos[3]).strip()
+                    if not ruc or not nombre or not dv:
+                        continue
+                    filas.append({
+                        "ruc": ruc,
+                        "razonSocial": nombre,
+                        "dv": dv,
+                        "rucAnterior": anterior,
+                        "_nombre": _normalizar_busqueda_dnit(nombre),
+                    })
+
+    _DNIT_RUC_CACHE["rows"] = filas
+    _DNIT_RUC_CACHE["loaded_at"] = time.time()
+    return filas
+
+
+# Búsqueda pública de contribuyentes por nombre, razón social o documento.
+# La búsqueda por nombre utiliza exclusivamente el padrón público publicado por DNIT.
 @app.route("/api/ruc/search", methods=["GET"])
 def buscar_ruc():
     termino = str(request.args.get("search", "")).strip()
-    pagina = str(request.args.get("page", "0")).strip() or "0"
-
     if len(termino) < 3:
         return jsonify({"error": "Ingresá al menos 3 caracteres para buscar."}), 400
 
+    consulta = _normalizar_busqueda_dnit(termino)
     try:
-        pagina_num = int(pagina)
-        if pagina_num < 0:
-            raise ValueError
-    except ValueError:
-        return jsonify({"error": "La página indicada no es válida."}), 400
-
-    try:
-        respuesta = requests.get(
-            "https://turuc.com.py/api/contribuyente/search",
-            params={"search": termino, "page": pagina_num},
-            timeout=10,
-            headers={"Accept": "application/json", "User-Agent": "Kakuaa-Consultores/1.0"},
-        )
-        try:
-            datos = respuesta.json()
-        except ValueError:
-            return jsonify({"error": "TuRuc devolvió una respuesta no válida."}), 502
-
-        if respuesta.status_code >= 400:
-            mensaje = datos.get("message") if isinstance(datos, dict) else None
-            return jsonify({"error": mensaje or "No se pudo realizar la búsqueda."}), respuesta.status_code
-
-        return jsonify(datos), 200
+        filas = _cargar_padron_ruc_dnit()
+        tokens = [t for t in consulta.split(" ") if t]
+        resultados = []
+        for fila in filas:
+            nombre = fila["_nombre"]
+            if all(token in nombre for token in tokens):
+                resultados.append({k: v for k, v in fila.items() if not k.startswith("_")})
+                if len(resultados) >= 30:
+                    break
+        return jsonify({
+            "ok": True,
+            "fuente": "DNIT_PADRON_RUC",
+            "total": len(resultados),
+            "resultados": resultados,
+        }), 200
     except requests.RequestException:
-        return jsonify({"error": "No se pudo conectar con el servicio de búsqueda de RUC."}), 502
+        return jsonify({"error": "No se pudo descargar temporalmente el padrón público de RUC de la DNIT."}), 502
+    except (zipfile.BadZipFile, RuntimeError, ValueError) as exc:
+        return jsonify({"error": f"No se pudo procesar el padrón público de RUC de la DNIT: {exc}"}), 502
 
 
 
