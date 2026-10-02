@@ -3480,6 +3480,23 @@ def _normalizar_busqueda_dnit(valor):
     return re.sub(r"\s+", " ", valor).strip().upper()
 
 
+def _eliminar_tablas_padron_dnit_si_corresponde():
+    """Elimina únicamente las tablas del padrón DNIT cuando se solicita explícitamente."""
+    if os.environ.get("DNIT_RUC_PURGE", "0") != "1":
+        return
+    conn = get_db()
+    try:
+        # IMPORTANTE: estas son exclusivamente las tres tablas creadas para
+        # el padrón público DNIT. No se toca ninguna tabla del ERP.
+        conn.execute("DROP TABLE IF EXISTS dnit_ruc_historial")
+        conn.execute("DROP TABLE IF EXISTS dnit_ruc_sincronizaciones")
+        conn.execute("DROP TABLE IF EXISTS dnit_ruc_cache")
+        conn.commit()
+        print("[DNIT_RUC] Tablas del padrón eliminadas por solicitud explícita.")
+    finally:
+        conn.close()
+
+
 def init_dnit_ruc_db():
     if not _DNIT_RUC_ENABLED:
         return
