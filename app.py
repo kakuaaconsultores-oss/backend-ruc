@@ -3473,7 +3473,7 @@ def _cargar_padron_ruc_dnit():
 
     enlaces = {}
     for digito in range(10):
-        patron = rf'href=["\\\\\']([^"\\\\\']*ruc{digito}\\\\.zip[^"\\\\\']*)["\\\\\']'
+        patron = rf'href=["\\']([^"\\']*ruc{digito}\\.zip[^"\\']*)["\\']'
         encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
         if encontrados:
             url = encontrados[-1]
