@@ -3463,7 +3463,7 @@ def consultar_ruc():
 # Índice persistente del padrón público de RUC de la DNIT.
 # La búsqueda pública consulta PostgreSQL; el padrón se sincroniza en segundo plano.
 _DNIT_RUC_CACHE_TTL = int(os.environ.get("DNIT_RUC_CACHE_TTL", "86400"))
-_DNIT_RUC_LOAD = {"status": "idle", "error": "", "started_at": 0}
+_DNIT_RUC_LOAD = {"status": "idle", "error": "", "started_at": 0, "current_zip": None, "processed_zips": 0, "total_records": 0}
 _DNIT_RUC_LOAD_LOCK = threading.Lock()
 _DNIT_RUC_SYNC_LOCK = threading.Lock()
 _DNIT_RUC_BATCH_SIZE = 1000
@@ -3701,6 +3701,9 @@ def _cargar_padron_ruc_dnit():
             _DNIT_RUC_LOAD["status"] = "loading"
             _DNIT_RUC_LOAD["started_at"] = time.time()
             _DNIT_RUC_LOAD["error"] = ""
+            _DNIT_RUC_LOAD["current_zip"] = "preparando enlaces DNIT"
+            _DNIT_RUC_LOAD["processed_zips"] = 0
+            _DNIT_RUC_LOAD["total_records"] = 0
 
         snapshot = datetime.utcnow().isoformat()
         conn = get_db()
@@ -3723,6 +3726,18 @@ def _cargar_padron_ruc_dnit():
         total = 0
 
         for digito in range(10):
+            with _DNIT_RUC_LOAD_LOCK:
+                _DNIT_RUC_LOAD["current_zip"] = f"ruc{digito}.zip"
+                _DNIT_RUC_LOAD["processed_zips"] = digito
+                _DNIT_RUC_LOAD["total_records"] = total
+            print(f"[DNIT_RUC] Iniciando ruc{digito}.zip...")
+            conn.execute("""
+                UPDATE dnit_ruc_sincronizaciones
+                SET estado='procesando', registros=?, detalle=?
+                WHERE id=?
+            """, (total, f"Procesando ruc{digito}.zip", sync_id))
+            conn.commit()
+
             z = requests.get(
                 enlaces[digito],
                 stream=True,
@@ -3760,6 +3775,15 @@ def _cargar_padron_ruc_dnit():
                             _dnit_upsert_batch(conn, lote, snapshot)
                             total += len(lote)
             conn.commit()
+            with _DNIT_RUC_LOAD_LOCK:
+                _DNIT_RUC_LOAD["processed_zips"] = digito + 1
+                _DNIT_RUC_LOAD["total_records"] = total
+            conn.execute("""
+                UPDATE dnit_ruc_sincronizaciones
+                SET estado='procesando', registros=?, detalle=?
+                WHERE id=?
+            """, (total, f"ruc{digito}.zip procesado", sync_id))
+            conn.commit()
             print(f"[DNIT_RUC] ruc{digito}.zip procesado. Acumulado: {total}")
 
         conn.execute("""
@@ -3772,6 +3796,9 @@ def _cargar_padron_ruc_dnit():
         with _DNIT_RUC_LOAD_LOCK:
             _DNIT_RUC_LOAD["status"] = "ready"
             _DNIT_RUC_LOAD["error"] = ""
+            _DNIT_RUC_LOAD["current_zip"] = None
+            _DNIT_RUC_LOAD["processed_zips"] = 10
+            _DNIT_RUC_LOAD["total_records"] = total
         print(f"[DNIT_RUC] Sincronización completada: {total} registros.")
         return True
 
@@ -3791,6 +3818,7 @@ def _cargar_padron_ruc_dnit():
         with _DNIT_RUC_LOAD_LOCK:
             _DNIT_RUC_LOAD["status"] = "error"
             _DNIT_RUC_LOAD["error"] = str(exc)
+            _DNIT_RUC_LOAD["current_zip"] = None
         print(f"[DNIT_RUC] Error sincronizando padrón: {exc}")
         return False
     finally:
@@ -3823,6 +3851,30 @@ def _dnit_iniciar_sincronizacion_si_corresponde():
     return False
 
 
+@app.route("/api/ruc/status", methods=["GET"])
+def estado_sincronizacion_ruc():
+    with _DNIT_RUC_LOAD_LOCK:
+        carga = dict(_DNIT_RUC_LOAD)
+    datos = _obtener_estado_dnit()
+    conn = get_db()
+    try:
+        ultima = conn.execute("""
+            SELECT id, iniciado_en, finalizado_en, estado, registros, detalle
+            FROM dnit_ruc_sincronizaciones
+            ORDER BY id DESC
+            LIMIT 1
+        """).fetchone()
+        ultima_sync = dict(ultima) if ultima else None
+    finally:
+        conn.close()
+    return jsonify({
+        "ok": True,
+        "carga": carga,
+        "base": datos,
+        "ultimaSincronizacion": ultima_sync,
+    }), 200
+
+
 # Búsqueda pública de contribuyentes por nombre, razón social o RUC.
 # La consulta normal nunca descarga DNIT: busca sobre la copia persistente.
 @app.route("/api/ruc/search", methods=["GET"])
@@ -3837,6 +3889,14 @@ def buscar_ruc():
     with _DNIT_RUC_LOAD_LOCK:
         estado_carga = _DNIT_RUC_LOAD["status"]
         error_carga = _DNIT_RUC_LOAD["error"]
+
+    if estado_carga == "error":
+        return jsonify({
+            "ok": False,
+            "estado": "error",
+            "mensaje": "No pudimos actualizar temporalmente el padrón público de la DNIT.",
+            "detalle": error_carga,
+        }), 502
 
     if estado_carga == "loading" and _dnit_necesita_sincronizar():
         datos = _obtener_estado_dnit()
