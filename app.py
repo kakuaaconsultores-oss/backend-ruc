@@ -3687,7 +3687,14 @@ def _dnit_upsert_batch(conn, lote, snapshot):
             for x in lote
         ]
 
-    conn.executemany(sql, params)
+    # CompatPGConnection expone execute() para mantener compatibilidad con
+    # SQLite, pero psycopg no tiene executemany() directamente en la conexión.
+    # La operación por lote debe ejecutarse sobre un cursor en ambos backends.
+    cursor = conn.cursor()
+    try:
+        cursor.executemany(sql, params)
+    finally:
+        cursor.close()
 
 
 def _cargar_padron_ruc_dnit():
