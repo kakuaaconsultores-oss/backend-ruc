@@ -3467,6 +3467,7 @@ _DNIT_RUC_LOAD = {"status": "idle", "error": "", "started_at": 0, "current_zip":
 _DNIT_RUC_LOAD_LOCK = threading.Lock()
 _DNIT_RUC_SYNC_LOCK = threading.Lock()
 _DNIT_RUC_BATCH_SIZE = 1000
+_DNIT_RUC_FORMAT_VERSION = "2"
 
 
 def _normalizar_busqueda_dnit(valor):
@@ -3511,8 +3512,13 @@ def init_dnit_ruc_db():
             finalizado_en TEXT DEFAULT NULL,
             estado TEXT NOT NULL DEFAULT 'iniciando',
             registros INTEGER NOT NULL DEFAULT 0,
-            detalle TEXT DEFAULT ''
+            detalle TEXT DEFAULT '',
+            parser_version TEXT DEFAULT ''
         )""")
+        try:
+            conn.execute("ALTER TABLE dnit_ruc_sincronizaciones ADD COLUMN parser_version TEXT DEFAULT ''")
+        except Exception:
+            pass
         if DB_BACKEND == "postgres":
             conn.execute("""
                 CREATE OR REPLACE FUNCTION dnit_ruc_registrar_cambio()
@@ -3571,11 +3577,20 @@ def _obtener_estado_dnit():
             SELECT MAX(ultima_actualizacion) AS ultima_actualizacion
             FROM dnit_ruc_cache
         """).fetchone()
+        ultima_sync = conn.execute("""
+            SELECT parser_version
+            FROM dnit_ruc_sincronizaciones
+            WHERE estado='completado'
+            ORDER BY id DESC
+            LIMIT 1
+        """).fetchone()
+        parser_version = str(ultima_sync["parser_version"] or "") if ultima_sync else ""
         if not fila or not fila["ultima_actualizacion"]:
-            return {"hay_datos": False, "ultima_actualizacion": None}
+            return {"hay_datos": False, "ultima_actualizacion": None, "parser_version": parser_version}
         return {
             "hay_datos": True,
             "ultima_actualizacion": str(fila["ultima_actualizacion"]),
+            "parser_version": parser_version,
         }
     finally:
         conn.close()
@@ -3725,16 +3740,16 @@ def _cargar_padron_ruc_dnit():
         conn = get_db()
         if DB_BACKEND == "postgres":
             fila_sync = conn.execute("""
-                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle)
-                VALUES ('cargando', 0, '')
+                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle, parser_version)
+                VALUES ('cargando', 0, '', ?)
                 RETURNING id
-            """).fetchone()
+            """, (_DNIT_RUC_FORMAT_VERSION,)).fetchone()
             sync_id = fila_sync["id"]
         else:
             fila_sync = conn.execute("""
-                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle)
-                VALUES ('cargando', 0, '')
-            """)
+                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle, parser_version)
+                VALUES ('cargando', 0, '', ?)
+            """, (_DNIT_RUC_FORMAT_VERSION,))
             sync_id = fila_sync.lastrowid
         conn.commit()
 
@@ -3847,6 +3862,8 @@ def _dnit_necesita_sincronizar():
     datos = _obtener_estado_dnit()
     if not datos["hay_datos"]:
         return True
+    if datos.get("parser_version") != _DNIT_RUC_FORMAT_VERSION:
+        return True
     try:
         ultima = datetime.fromisoformat(datos["ultima_actualizacion"].replace("Z", ""))
         return (datetime.utcnow() - ultima).total_seconds() >= _DNIT_RUC_CACHE_TTL
@@ -3875,7 +3892,7 @@ def estado_sincronizacion_ruc():
     conn = get_db()
     try:
         ultima = conn.execute("""
-            SELECT id, iniciado_en, finalizado_en, estado, registros, detalle
+            SELECT id, iniciado_en, finalizado_en, estado, registros, detalle, parser_version
             FROM dnit_ruc_sincronizaciones
             ORDER BY id DESC
             LIMIT 1
