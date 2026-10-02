@@ -11,6 +11,7 @@ import re
 import zipfile
 import unicodedata
 import threading
+import tempfile
 import requests
 import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
@@ -3459,12 +3460,13 @@ def consultar_ruc():
     except requests.RequestException:
         return jsonify({"error": "No se pudo conectar con el servicio de consulta de RUC."}), 502
 
-# Índice local temporal del padrón público de RUC de la DNIT.
-# La DNIT publica ruc0.zip ... ruc9.zip en su portal institucional.
-_DNIT_RUC_CACHE = {"loaded_at": 0, "rows": []}
+# Índice persistente del padrón público de RUC de la DNIT.
+# La búsqueda pública consulta PostgreSQL; el padrón se sincroniza en segundo plano.
 _DNIT_RUC_CACHE_TTL = int(os.environ.get("DNIT_RUC_CACHE_TTL", "86400"))
 _DNIT_RUC_LOAD = {"status": "idle", "error": "", "started_at": 0}
 _DNIT_RUC_LOAD_LOCK = threading.Lock()
+_DNIT_RUC_SYNC_LOCK = threading.Lock()
+_DNIT_RUC_BATCH_SIZE = 1000
 
 
 def _normalizar_busqueda_dnit(valor):
@@ -3473,94 +3475,355 @@ def _normalizar_busqueda_dnit(valor):
     return re.sub(r"\s+", " ", valor).strip().upper()
 
 
-def _cargar_padron_ruc_dnit():
-    ahora = time.time()
-    if _DNIT_RUC_CACHE["rows"] and ahora - _DNIT_RUC_CACHE["loaded_at"] < _DNIT_RUC_CACHE_TTL:
-        with _DNIT_RUC_LOAD_LOCK:
-            _DNIT_RUC_LOAD["status"] = "ready"
-            _DNIT_RUC_LOAD["error"] = ""
-        return _DNIT_RUC_CACHE["rows"]
-
-    with _DNIT_RUC_LOAD_LOCK:
-        _DNIT_RUC_LOAD["status"] = "loading"
-        _DNIT_RUC_LOAD["started_at"] = time.time()
-        _DNIT_RUC_LOAD["error"] = ""
-
+def init_dnit_ruc_db():
+    conn = get_db()
     try:
-        portal = "https://www.dnit.gov.py/en/web/portal-institucional/listado-de-ruc-con-sus-equivalencias"
-        respuesta = requests.get(
-            portal,
-            timeout=20,
-            headers={"Accept": "text/html", "User-Agent": "Kakuaa-Consultores/1.0"},
-        )
-        respuesta.raise_for_status()
+        id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "datetime('now')"
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS dnit_ruc_cache (
+            id {id_type},
+            ruc TEXT NOT NULL UNIQUE,
+            razon_social TEXT NOT NULL,
+            dv TEXT NOT NULL DEFAULT '',
+            ruc_anterior TEXT DEFAULT '',
+            estado TEXT DEFAULT '',
+            nombre_normalizado TEXT NOT NULL,
+            ultima_actualizacion TEXT NOT NULL,
+            ultimo_snapshot TEXT NOT NULL
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dnit_ruc_cache_nombre ON dnit_ruc_cache(nombre_normalizado)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dnit_ruc_cache_estado ON dnit_ruc_cache(estado)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS dnit_ruc_historial (
+            id {id_type},
+            ruc TEXT NOT NULL,
+            razon_social TEXT NOT NULL,
+            estado TEXT DEFAULT '',
+            dv TEXT DEFAULT '',
+            ruc_anterior TEXT DEFAULT '',
+            registrado_en TEXT NOT NULL,
+            snapshot TEXT NOT NULL
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dnit_ruc_historial_ruc ON dnit_ruc_historial(ruc, registrado_en)")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS dnit_ruc_sincronizaciones (
+            id {id_type},
+            iniciado_en TEXT NOT NULL DEFAULT {now_default},
+            finalizado_en TEXT DEFAULT NULL,
+            estado TEXT NOT NULL DEFAULT 'iniciando',
+            registros INTEGER NOT NULL DEFAULT 0,
+            detalle TEXT DEFAULT ''
+        )""")
+        if DB_BACKEND == "postgres":
+            conn.execute("""
+                CREATE OR REPLACE FUNCTION dnit_ruc_registrar_cambio()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF OLD.razon_social IS DISTINCT FROM NEW.razon_social
+                       OR OLD.estado IS DISTINCT FROM NEW.estado
+                       OR OLD.dv IS DISTINCT FROM NEW.dv
+                       OR OLD.ruc_anterior IS DISTINCT FROM NEW.ruc_anterior THEN
+                        INSERT INTO dnit_ruc_historial
+                            (ruc, razon_social, estado, dv, ruc_anterior, registrado_en, snapshot)
+                        VALUES
+                            (OLD.ruc, OLD.razon_social, COALESCE(OLD.estado,''), COALESCE(OLD.dv,''),
+                             COALESCE(OLD.ruc_anterior,''), CURRENT_TIMESTAMP::text, OLD.ultimo_snapshot);
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+            """)
+            conn.execute("DROP TRIGGER IF EXISTS trg_dnit_ruc_cambio ON dnit_ruc_cache")
+            conn.execute("""
+                CREATE TRIGGER trg_dnit_ruc_cambio
+                BEFORE UPDATE ON dnit_ruc_cache
+                FOR EACH ROW EXECUTE FUNCTION dnit_ruc_registrar_cambio()
+            """)
+        else:
+            conn.execute("DROP TRIGGER IF EXISTS trg_dnit_ruc_cambio")
+            conn.execute("""
+                CREATE TRIGGER trg_dnit_ruc_cambio
+                BEFORE UPDATE OF razon_social, estado, dv, ruc_anterior ON dnit_ruc_cache
+                FOR EACH ROW
+                WHEN OLD.razon_social <> NEW.razon_social
+                  OR OLD.estado <> NEW.estado
+                  OR OLD.dv <> NEW.dv
+                  OR OLD.ruc_anterior <> NEW.ruc_anterior
+                BEGIN
+                    INSERT INTO dnit_ruc_historial
+                        (ruc, razon_social, estado, dv, ruc_anterior, registrado_en, snapshot)
+                    VALUES
+                        (OLD.ruc, OLD.razon_social, COALESCE(OLD.estado,''), COALESCE(OLD.dv,''),
+                         COALESCE(OLD.ruc_anterior,''), datetime('now'), OLD.ultimo_snapshot);
+                END
+            """)
+        conn.commit()
+    finally:
+        conn.close()
 
-        enlaces = {}
-        for digito in range(10):
-            patron = rf"""href=["']([^"']*ruc{digito}\.zip[^"']*)["']"""
-            encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
-            if encontrados:
-                url = encontrados[-1]
-                if url.startswith("/"):
-                    url = "https://www.dnit.gov.py" + url
-                elif not url.startswith("http"):
-                    url = "https://www.dnit.gov.py/" + url.lstrip("/")
-                enlaces[digito] = url
 
-        if len(enlaces) < 10:
-            raise RuntimeError("La DNIT no publicó temporalmente todos los archivos del padrón RUC.")
+init_dnit_ruc_db()
 
-        filas = []
+
+def _obtener_estado_dnit():
+    conn = get_db()
+    try:
+        fila = conn.execute("""
+            SELECT estado, MAX(ultima_actualizacion) AS ultima_actualizacion
+            FROM dnit_ruc_cache
+        """).fetchone()
+        if not fila or not fila["ultima_actualizacion"]:
+            return {"hay_datos": False, "ultima_actualizacion": None}
+        return {
+            "hay_datos": True,
+            "ultima_actualizacion": str(fila["ultima_actualizacion"]),
+        }
+    finally:
+        conn.close()
+
+
+def _dnit_parsear_linea(linea):
+    campos = linea.split("|")
+    if len(campos) < 4:
+        return None
+
+    # La estructura publicada actualmente es:
+    # RUC | Razón Social | Estado | DV | RUC anterior
+    # Se arma el nombre con los campos intermedios para tolerar nombres
+    # que contengan "|" sin escaparlo.
+    ruc = str(campos[0]).strip()
+    if len(campos) >= 5:
+        dv = str(campos[-2]).strip()
+        anterior = str(campos[-1]).strip()
+        estado = str(campos[-3]).strip()
+        nombre = "|".join(campos[1:-3]).strip()
+    else:
+        # Compatibilidad con snapshots antiguos de cuatro campos.
+        nombre = str(campos[1]).strip()
+        dv = str(campos[2]).strip()
+        anterior = str(campos[3]).strip()
+        estado = ""
+
+    if not ruc or not nombre or not dv:
+        return None
+
+    return {
+        "ruc": ruc,
+        "razon_social": nombre,
+        "dv": dv,
+        "ruc_anterior": anterior,
+        "estado": estado.upper(),
+        "nombre_normalizado": _normalizar_busqueda_dnit(nombre),
+    }
+
+
+def _dnit_obtener_enlaces():
+    portal = "https://www.dnit.gov.py/en/web/portal-institucional/listado-de-ruc-con-sus-equivalencias"
+    respuesta = requests.get(
+        portal,
+        timeout=20,
+        headers={"Accept": "text/html", "User-Agent": "Kakuaa-Consultores/1.0"},
+    )
+    respuesta.raise_for_status()
+
+    enlaces = {}
+    for digito in range(10):
+        patron = rf"""href=["']([^"']*ruc{digito}\.zip[^"']*)["']"""
+        encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
+        if encontrados:
+            url = encontrados[-1]
+            if url.startswith("/"):
+                url = "https://www.dnit.gov.py" + url
+            elif not url.startswith("http"):
+                url = "https://www.dnit.gov.py/" + url.lstrip("/")
+            enlaces[digito] = url
+
+    if len(enlaces) < 10:
+        raise RuntimeError("La DNIT no publicó temporalmente todos los archivos del padrón RUC.")
+    return enlaces
+
+
+def _dnit_upsert_batch(conn, lote, snapshot):
+    if not lote:
+        return
+
+    if DB_BACKEND == "postgres":
+        sql = """
+            INSERT INTO dnit_ruc_cache
+                (ruc, razon_social, dv, ruc_anterior, estado, nombre_normalizado,
+                 ultima_actualizacion, ultimo_snapshot)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (ruc) DO UPDATE SET
+                razon_social=EXCLUDED.razon_social,
+                dv=EXCLUDED.dv,
+                ruc_anterior=EXCLUDED.ruc_anterior,
+                estado=EXCLUDED.estado,
+                nombre_normalizado=EXCLUDED.nombre_normalizado,
+                ultima_actualizacion=EXCLUDED.ultima_actualizacion,
+                ultimo_snapshot=EXCLUDED.ultimo_snapshot
+        """
+        params = [
+            (x["ruc"], x["razon_social"], x["dv"], x["ruc_anterior"], x["estado"],
+             x["nombre_normalizado"], snapshot, snapshot)
+            for x in lote
+        ]
+    else:
+        sql = """
+            INSERT INTO dnit_ruc_cache
+                (ruc, razon_social, dv, ruc_anterior, estado, nombre_normalizado,
+                 ultima_actualizacion, ultimo_snapshot)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(ruc) DO UPDATE SET
+                razon_social=excluded.razon_social,
+                dv=excluded.dv,
+                ruc_anterior=excluded.ruc_anterior,
+                estado=excluded.estado,
+                nombre_normalizado=excluded.nombre_normalizado,
+                ultima_actualizacion=excluded.ultima_actualizacion,
+                ultimo_snapshot=excluded.ultimo_snapshot
+        """
+        params = [
+            (x["ruc"], x["razon_social"], x["dv"], x["ruc_anterior"], x["estado"],
+             x["nombre_normalizado"], snapshot, snapshot)
+            for x in lote
+        ]
+
+    conn.executemany(sql, params)
+
+
+def _cargar_padron_ruc_dnit():
+    if not _DNIT_RUC_SYNC_LOCK.acquire(blocking=False):
+        return False
+
+    sync_id = None
+    conn = None
+    try:
+        with _DNIT_RUC_LOAD_LOCK:
+            _DNIT_RUC_LOAD["status"] = "loading"
+            _DNIT_RUC_LOAD["started_at"] = time.time()
+            _DNIT_RUC_LOAD["error"] = ""
+
+        snapshot = datetime.utcnow().isoformat()
+        conn = get_db()
+        if DB_BACKEND == "postgres":
+            fila_sync = conn.execute("""
+                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle)
+                VALUES ('cargando', 0, '')
+                RETURNING id
+            """).fetchone()
+            sync_id = fila_sync["id"]
+        else:
+            fila_sync = conn.execute("""
+                INSERT INTO dnit_ruc_sincronizaciones (estado, registros, detalle)
+                VALUES ('cargando', 0, '')
+            """)
+            sync_id = fila_sync.lastrowid
+        conn.commit()
+
+        enlaces = _dnit_obtener_enlaces()
+        total = 0
+
         for digito in range(10):
             z = requests.get(
                 enlaces[digito],
-                timeout=45,
+                stream=True,
+                timeout=90,
                 headers={
                     "Accept": "application/zip,application/octet-stream",
                     "User-Agent": "Kakuaa-Consultores/1.0",
                 },
             )
             z.raise_for_status()
-            with zipfile.ZipFile(io.BytesIO(z.content)) as archivo_zip:
-                txts = [n for n in archivo_zip.namelist() if n.lower().endswith(".txt")]
-                if not txts:
-                    continue
-                with archivo_zip.open(txts[0]) as archivo_txt:
-                    for raw in archivo_txt:
-                        linea = raw.decode("utf-8-sig", errors="replace").rstrip("\r\n")
-                        campos = linea.split("|")
-                        if len(campos) < 4:
-                            continue
-                        ruc = str(campos[0]).strip()
-                        nombre = str(campos[1]).strip()
-                        dv = str(campos[2]).strip()
-                        anterior = str(campos[3]).strip()
-                        if not ruc or not nombre or not dv:
-                            continue
-                        filas.append({
-                            "ruc": ruc,
-                            "razonSocial": nombre,
-                            "dv": dv,
-                            "rucAnterior": anterior,
-                            "_nombre": _normalizar_busqueda_dnit(nombre),
-                        })
 
-        _DNIT_RUC_CACHE["rows"] = filas
-        _DNIT_RUC_CACHE["loaded_at"] = time.time()
+            with tempfile.NamedTemporaryFile(prefix=f"kakuaa-ruc{digito}-", suffix=".zip") as temporal:
+                for chunk in z.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        temporal.write(chunk)
+                temporal.flush()
+
+                with zipfile.ZipFile(temporal.name) as archivo_zip:
+                    txts = [n for n in archivo_zip.namelist() if n.lower().endswith(".txt")]
+                    if not txts:
+                        raise RuntimeError(f"El archivo ruc{digito}.zip no contiene un TXT.")
+                    with archivo_zip.open(txts[0]) as archivo_txt:
+                        lote = []
+                        for raw in archivo_txt:
+                            linea = raw.decode("utf-8-sig", errors="replace").rstrip("\r\n")
+                            fila = _dnit_parsear_linea(linea)
+                            if not fila:
+                                continue
+                            lote.append(fila)
+                            if len(lote) >= _DNIT_RUC_BATCH_SIZE:
+                                _dnit_upsert_batch(conn, lote, snapshot)
+                                total += len(lote)
+                                lote = []
+                        if lote:
+                            _dnit_upsert_batch(conn, lote, snapshot)
+                            total += len(lote)
+            conn.commit()
+            print(f"[DNIT_RUC] ruc{digito}.zip procesado. Acumulado: {total}")
+
+        conn.execute("""
+            UPDATE dnit_ruc_sincronizaciones
+            SET finalizado_en=?, estado='completado', registros=?, detalle=''
+            WHERE id=?
+        """, (datetime.utcnow().isoformat(), total, sync_id))
+        conn.commit()
+
         with _DNIT_RUC_LOAD_LOCK:
             _DNIT_RUC_LOAD["status"] = "ready"
             _DNIT_RUC_LOAD["error"] = ""
-        return filas
+        print(f"[DNIT_RUC] Sincronización completada: {total} registros.")
+        return True
+
     except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+                if sync_id is not None:
+                    conn.execute("""
+                        UPDATE dnit_ruc_sincronizaciones
+                        SET finalizado_en=?, estado='error', detalle=?
+                        WHERE id=?
+                    """, (datetime.utcnow().isoformat(), str(exc)[:1000], sync_id))
+                    conn.commit()
+            except Exception:
+                pass
         with _DNIT_RUC_LOAD_LOCK:
             _DNIT_RUC_LOAD["status"] = "error"
             _DNIT_RUC_LOAD["error"] = str(exc)
-        print(f"[DNIT_RUC] Error preparando padrón: {exc}")
-        raise
+        print(f"[DNIT_RUC] Error sincronizando padrón: {exc}")
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+        _DNIT_RUC_SYNC_LOCK.release()
 
 
-# Búsqueda pública de contribuyentes por nombre, razón social o documento.
-# La búsqueda por nombre utiliza exclusivamente el padrón público publicado por DNIT.
+def _dnit_necesita_sincronizar():
+    datos = _obtener_estado_dnit()
+    if not datos["hay_datos"]:
+        return True
+    try:
+        ultima = datetime.fromisoformat(datos["ultima_actualizacion"].replace("Z", ""))
+        return (datetime.utcnow() - ultima).total_seconds() >= _DNIT_RUC_CACHE_TTL
+    except (TypeError, ValueError):
+        return True
+
+
+def _dnit_iniciar_sincronizacion_si_corresponde():
+    if _dnit_necesita_sincronizar():
+        with _DNIT_RUC_LOAD_LOCK:
+            if _DNIT_RUC_LOAD["status"] != "loading":
+                threading.Thread(
+                    target=_cargar_padron_ruc_dnit,
+                    daemon=True,
+                    name="dnit-ruc-sync",
+                ).start()
+        return True
+    return False
+
+
+# Búsqueda pública de contribuyentes por nombre, razón social o RUC.
+# La consulta normal nunca descarga DNIT: busca sobre la copia persistente.
 @app.route("/api/ruc/search", methods=["GET"])
 def buscar_ruc():
     termino = str(request.args.get("search", "")).strip()
@@ -3568,55 +3831,97 @@ def buscar_ruc():
         return jsonify({"error": "Ingresá al menos 3 caracteres para buscar."}), 400
 
     consulta = _normalizar_busqueda_dnit(termino)
+    _dnit_iniciar_sincronizacion_si_corresponde()
 
     with _DNIT_RUC_LOAD_LOCK:
-        estado = _DNIT_RUC_LOAD["status"]
+        estado_carga = _DNIT_RUC_LOAD["status"]
         error_carga = _DNIT_RUC_LOAD["error"]
 
-    if _DNIT_RUC_CACHE["rows"] and time.time() - _DNIT_RUC_CACHE["loaded_at"] < _DNIT_RUC_CACHE_TTL:
-        estado = "ready"
+    if estado_carga == "loading" and _dnit_necesita_sincronizar():
+        datos = _obtener_estado_dnit()
+        if not datos["hay_datos"]:
+            return jsonify({
+                "ok": False,
+                "estado": "cargando",
+                "mensaje": "Estamos preparando la base pública de RUC de la DNIT. Volvé a consultar en unos segundos."
+            }), 202
 
-    if estado == "idle" or estado == "error":
-        with _DNIT_RUC_LOAD_LOCK:
-            if _DNIT_RUC_LOAD["status"] in ("idle", "error"):
-                _DNIT_RUC_LOAD["status"] = "loading"
-                _DNIT_RUC_LOAD["started_at"] = time.time()
-                _DNIT_RUC_LOAD["error"] = ""
-                threading.Thread(target=_cargar_padron_ruc_dnit, daemon=True, name="dnit-ruc-loader").start()
-        return jsonify({
-            "ok": False,
-            "estado": "cargando",
-            "mensaje": "Estamos preparando la base pública de RUC de la DNIT. Volvé a consultar en unos segundos."
-        }), 202
-
-    if estado == "loading":
-        return jsonify({
-            "ok": False,
-            "estado": "cargando",
-            "mensaje": "La base pública de RUC de la DNIT todavía se está preparando."
-        }), 202
-
+    tokens = [t for t in consulta.split(" ") if t]
+    conn = get_db()
     try:
-        filas = _DNIT_RUC_CACHE["rows"]
-        tokens = [t for t in consulta.split(" ") if t]
-        resultados = []
-        for fila in filas:
-            nombre = fila["_nombre"]
-            if all(token in nombre for token in tokens):
-                resultados.append({k: v for k, v in fila.items() if not k.startswith("_")})
-                if len(resultados) >= 30:
-                    break
+        if DB_BACKEND == "postgres":
+            condiciones = ["nombre_normalizado LIKE %s"]
+            params = [f"%{tokens[0]}%"]
+            for token in tokens[1:]:
+                condiciones.append("nombre_normalizado LIKE %s")
+                params.append(f"%{token}%")
+            where = " AND ".join(condiciones)
+            filas = conn.execute(f"""
+                SELECT ruc, razon_social, dv, ruc_anterior, estado,
+                       ultima_actualizacion
+                FROM dnit_ruc_cache
+                WHERE {where}
+                ORDER BY razon_social
+                LIMIT 30
+            """, params).fetchall()
+        else:
+            condiciones = ["nombre_normalizado LIKE ?"]
+            params = [f"%{tokens[0]}%"]
+            for token in tokens[1:]:
+                condiciones.append("nombre_normalizado LIKE ?")
+                params.append(f"%{token}%")
+            where = " AND ".join(condiciones)
+            filas = conn.execute(f"""
+                SELECT ruc, razon_social, dv, ruc_anterior, estado,
+                       ultima_actualizacion
+                FROM dnit_ruc_cache
+                WHERE {where}
+                ORDER BY razon_social
+                LIMIT 30
+            """, params).fetchall()
+
         return jsonify({
             "ok": True,
             "fuente": "DNIT_PADRON_RUC",
-            "total": len(resultados),
-            "resultados": resultados,
+            "total": len(filas),
+            "resultados": [
+                {
+                    "ruc": f["ruc"],
+                    "razonSocial": f["razon_social"],
+                    "dv": f["dv"],
+                    "rucAnterior": f["ruc_anterior"],
+                    "estado": f["estado"],
+                    "ultimaActualizacion": f["ultima_actualizacion"],
+                }
+                for f in filas
+            ],
         }), 200
-    except requests.RequestException:
-        return jsonify({"error": "No se pudo descargar temporalmente el padrón público de RUC de la DNIT."}), 502
-    except (zipfile.BadZipFile, RuntimeError, ValueError) as exc:
-        return jsonify({"error": f"No se pudo procesar el padrón público de RUC de la DNIT: {exc}"}), 502
+    finally:
+        conn.close()
 
+
+@app.route("/api/ruc/<string:ruc>/historial", methods=["GET"])
+def historial_ruc_publico(ruc):
+    ruc = str(ruc).strip().replace(" ", "").replace("-", "")
+    if not ruc:
+        return jsonify({"error": "El RUC es obligatorio."}), 400
+    conn = get_db()
+    try:
+        filas = conn.execute("""
+            SELECT ruc, razon_social, estado, dv, ruc_anterior,
+                   registrado_en, snapshot
+            FROM dnit_ruc_historial
+            WHERE ruc=?
+            ORDER BY registrado_en DESC
+            LIMIT 50
+        """, (ruc,)).fetchall()
+        return jsonify({
+            "ok": True,
+            "ruc": ruc,
+            "historial": [dict(f) for f in filas],
+        }), 200
+    finally:
+        conn.close()
 
 
 def _xml_name(tag):
