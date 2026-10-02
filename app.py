@@ -10,6 +10,7 @@ import shutil
 import re
 import zipfile
 import unicodedata
+import threading
 import requests
 import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
@@ -3450,6 +3451,8 @@ def consultar_ruc():
 # La DNIT publica ruc0.zip ... ruc9.zip en su portal institucional.
 _DNIT_RUC_CACHE = {"loaded_at": 0, "rows": []}
 _DNIT_RUC_CACHE_TTL = int(os.environ.get("DNIT_RUC_CACHE_TTL", "86400"))
+_DNIT_RUC_LOAD = {"status": "idle", "error": "", "started_at": 0}
+_DNIT_RUC_LOAD_LOCK = threading.Lock()
 
 
 def _normalizar_busqueda_dnit(valor):
@@ -3461,45 +3464,54 @@ def _normalizar_busqueda_dnit(valor):
 def _cargar_padron_ruc_dnit():
     ahora = time.time()
     if _DNIT_RUC_CACHE["rows"] and ahora - _DNIT_RUC_CACHE["loaded_at"] < _DNIT_RUC_CACHE_TTL:
+        with _DNIT_RUC_LOAD_LOCK:
+            _DNIT_RUC_LOAD["status"] = "ready"
+            _DNIT_RUC_LOAD["error"] = ""
         return _DNIT_RUC_CACHE["rows"]
 
-    portal = "https://www.dnit.gov.py/en/web/portal-institucional/listado-de-ruc-con-sus-equivalencias"
-    respuesta = requests.get(
-        portal,
-        timeout=20,
-        headers={"Accept": "text/html", "User-Agent": "Kakuaa-Consultores/1.0"},
-    )
-    respuesta.raise_for_status()
+    with _DNIT_RUC_LOAD_LOCK:
+        _DNIT_RUC_LOAD["status"] = "loading"
+        _DNIT_RUC_LOAD["started_at"] = time.time()
+        _DNIT_RUC_LOAD["error"] = ""
 
-    enlaces = {}
-    for digito in range(10):
-        patron = rf'href=["\']([^"\']*ruc{digito}\.zip[^"\']*)["\']'
-        encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
-        if encontrados:
-            url = encontrados[-1]
-            if url.startswith("/"):
-                url = "https://www.dnit.gov.py" + url
-            elif not url.startswith("http"):
-                url = "https://www.dnit.gov.py/" + url.lstrip("/")
-            enlaces[digito] = url
-
-    if len(enlaces) < 10:
-        raise RuntimeError("La DNIT no publicó temporalmente todos los archivos del padrón RUC.")
-
-    filas = []
-    for digito in range(10):
-        z = requests.get(
-            enlaces[digito],
-            timeout=45,
-            headers={"Accept": "application/zip,application/octet-stream", "User-Agent": "Kakuaa-Consultores/1.0"},
+    try:
+        portal = "https://www.dnit.gov.py/en/web/portal-institucional/listado-de-ruc-con-sus-equivalencias"
+        respuesta = requests.get(
+            portal,
+            timeout=20,
+            headers={"Accept": "text/html", "User-Agent": "Kakuaa-Consultores/1.0"},
         )
-        z.raise_for_status()
-        with zipfile.ZipFile(io.BytesIO(z.content)) as archivo_zip:
-            txts = [n for n in archivo_zip.namelist() if n.lower().endswith(".txt")]
-            if not txts:
-                continue
-            with archivo_zip.open(txts[0]) as archivo_txt:
-                for raw in archivo_txt:
+        respuesta.raise_for_status()
+
+        enlaces = {}
+        for digito in range(10):
+            patron = rf'href=["\']([^"\']*ruc{digito}\.zip[^"\']*)["\']'
+            encontrados = re.findall(patron, respuesta.text, flags=re.IGNORECASE)
+            if encontrados:
+                url = encontrados[-1]
+                if url.startswith("/"):
+                    url = "https://www.dnit.gov.py" + url
+                elif not url.startswith("http"):
+                    url = "https://www.dnit.gov.py/" + url.lstrip("/")
+                enlaces[digito] = url
+
+        if len(enlaces) < 10:
+            raise RuntimeError("La DNIT no publicó temporalmente todos los archivos del padrón RUC.")
+
+        filas = []
+        for digito in range(10):
+            z = requests.get(
+                enlaces[digito],
+                timeout=45,
+                headers={"Accept": "application/zip,application/octet-stream", "User-Agent": "Kakuaa-Consultores/1.0"},
+            )
+            z.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(z.content)) as archivo_zip:
+                txts = [n for n in archivo_zip.namelist() if n.lower().endswith(".txt")]
+                if not txts:
+                    continue
+                with archivo_zip.open(txts[0]) as archivo_txt:
+                    for raw in archivo_txt:
                     linea = raw.decode("utf-8-sig", errors="replace").rstrip("\\r\\n")
                     campos = linea.split("|")
                     if len(campos) < 4:
@@ -3510,17 +3522,25 @@ def _cargar_padron_ruc_dnit():
                     anterior = str(campos[3]).strip()
                     if not ruc or not nombre or not dv:
                         continue
-                    filas.append({
-                        "ruc": ruc,
-                        "razonSocial": nombre,
-                        "dv": dv,
-                        "rucAnterior": anterior,
-                        "_nombre": _normalizar_busqueda_dnit(nombre),
-                    })
+                        filas.append({
+                            "ruc": ruc,
+                            "razonSocial": nombre,
+                            "dv": dv,
+                            "rucAnterior": anterior,
+                            "_nombre": _normalizar_busqueda_dnit(nombre),
+                        })
 
-    _DNIT_RUC_CACHE["rows"] = filas
-    _DNIT_RUC_CACHE["loaded_at"] = time.time()
-    return filas
+        _DNIT_RUC_CACHE["rows"] = filas
+        _DNIT_RUC_CACHE["loaded_at"] = time.time()
+        with _DNIT_RUC_LOAD_LOCK:
+            _DNIT_RUC_LOAD["status"] = "ready"
+            _DNIT_RUC_LOAD["error"] = ""
+        return filas
+    except Exception as exc:
+        with _DNIT_RUC_LOAD_LOCK:
+            _DNIT_RUC_LOAD["status"] = "error"
+            _DNIT_RUC_LOAD["error"] = str(exc)
+        raise
 
 
 # Búsqueda pública de contribuyentes por nombre, razón social o documento.
@@ -3532,8 +3552,36 @@ def buscar_ruc():
         return jsonify({"error": "Ingresá al menos 3 caracteres para buscar."}), 400
 
     consulta = _normalizar_busqueda_dnit(termino)
+
+    with _DNIT_RUC_LOAD_LOCK:
+        estado = _DNIT_RUC_LOAD["status"]
+        error_carga = _DNIT_RUC_LOAD["error"]
+
+    if _DNIT_RUC_CACHE["rows"] and time.time() - _DNIT_RUC_CACHE["loaded_at"] < _DNIT_RUC_CACHE_TTL:
+        estado = "ready"
+
+    if estado == "idle" or estado == "error":
+        with _DNIT_RUC_LOAD_LOCK:
+            if _DNIT_RUC_LOAD["status"] in ("idle", "error"):
+                _DNIT_RUC_LOAD["status"] = "loading"
+                _DNIT_RUC_LOAD["started_at"] = time.time()
+                _DNIT_RUC_LOAD["error"] = ""
+                threading.Thread(target=_cargar_padron_ruc_dnit, daemon=True, name="dnit-ruc-loader").start()
+        return jsonify({
+            "ok": False,
+            "estado": "cargando",
+            "mensaje": "Estamos preparando la base pública de RUC de la DNIT. Volvé a consultar en unos segundos."
+        }), 202
+
+    if estado == "loading":
+        return jsonify({
+            "ok": False,
+            "estado": "cargando",
+            "mensaje": "La base pública de RUC de la DNIT todavía se está preparando."
+        }), 202
+
     try:
-        filas = _cargar_padron_ruc_dnit()
+        filas = _DNIT_RUC_CACHE["rows"]
         tokens = [t for t in consulta.split(" ") if t]
         resultados = []
         for fila in filas:
