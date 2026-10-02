@@ -3515,10 +3515,13 @@ def init_dnit_ruc_db():
             detalle TEXT DEFAULT '',
             parser_version TEXT DEFAULT ''
         )""")
-        try:
-            conn.execute("ALTER TABLE dnit_ruc_sincronizaciones ADD COLUMN parser_version TEXT DEFAULT ''")
-        except Exception:
-            pass
+        if DB_BACKEND == "postgres":
+            conn.execute("ALTER TABLE dnit_ruc_sincronizaciones ADD COLUMN IF NOT EXISTS parser_version TEXT DEFAULT ''")
+        else:
+            try:
+                conn.execute("ALTER TABLE dnit_ruc_sincronizaciones ADD COLUMN parser_version TEXT DEFAULT ''")
+            except Exception:
+                pass
         if DB_BACKEND == "postgres":
             conn.execute("""
                 CREATE OR REPLACE FUNCTION dnit_ruc_registrar_cambio()
