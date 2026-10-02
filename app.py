@@ -3468,6 +3468,10 @@ _DNIT_RUC_LOAD_LOCK = threading.Lock()
 _DNIT_RUC_SYNC_LOCK = threading.Lock()
 _DNIT_RUC_BATCH_SIZE = 1000
 _DNIT_RUC_FORMAT_VERSION = "2"
+# El padrón público DNIT queda desactivado temporalmente para conservar
+# el almacenamiento gratuito de Render. Se puede reactivar más adelante
+# sin afectar el resto del ERP.
+_DNIT_RUC_ENABLED = os.environ.get("DNIT_RUC_ENABLED", "0") == "1"
 
 
 def _normalizar_busqueda_dnit(valor):
@@ -3477,6 +3481,8 @@ def _normalizar_busqueda_dnit(valor):
 
 
 def init_dnit_ruc_db():
+    if not _DNIT_RUC_ENABLED:
+        return
     conn = get_db()
     try:
         id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -3889,6 +3895,12 @@ def _dnit_iniciar_sincronizacion_si_corresponde():
 
 @app.route("/api/ruc/status", methods=["GET"])
 def estado_sincronizacion_ruc():
+    if not _DNIT_RUC_ENABLED:
+        return jsonify({
+            "ok": False,
+            "estado": "desactivado",
+            "mensaje": "La consulta pública del padrón RUC de la DNIT está temporalmente desactivada."
+        }), 503
     with _DNIT_RUC_LOAD_LOCK:
         carga = dict(_DNIT_RUC_LOAD)
     datos = _obtener_estado_dnit()
@@ -3915,6 +3927,13 @@ def estado_sincronizacion_ruc():
 # La consulta normal nunca descarga DNIT: busca sobre la copia persistente.
 @app.route("/api/ruc/search", methods=["GET"])
 def buscar_ruc():
+    if not _DNIT_RUC_ENABLED:
+        return jsonify({
+            "ok": False,
+            "estado": "desactivado",
+            "mensaje": "La consulta pública del padrón RUC de la DNIT está temporalmente desactivada."
+        }), 503
+
     termino = str(request.args.get("search", "")).strip()
     if len(termino) < 3:
         return jsonify({"error": "Ingresá al menos 3 caracteres para buscar."}), 400
@@ -3999,6 +4018,13 @@ def buscar_ruc():
 
 @app.route("/api/ruc/<string:ruc>/historial", methods=["GET"])
 def historial_ruc_publico(ruc):
+    if not _DNIT_RUC_ENABLED:
+        return jsonify({
+            "ok": False,
+            "estado": "desactivado",
+            "mensaje": "El historial público de RUC de la DNIT está temporalmente desactivado."
+        }), 503
+
     ruc = str(ruc).strip().replace(" ", "").replace("-", "")
     if not ruc:
         return jsonify({"error": "El RUC es obligatorio."}), 400
