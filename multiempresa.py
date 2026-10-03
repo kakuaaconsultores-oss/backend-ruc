@@ -15,6 +15,9 @@ MODULOS_DEFAULT = [
     ("TESORERIA", "Tesorería", "Caja, bancos y pagos"),
     ("INVENTARIO", "Inventario", "Existencias, movimientos y stock"),
     ("FACTURACION_ELECTRONICA", "Facturación Electrónica", "SIFEN y documentos electrónicos"),
+    ("INGRESOS", "Ingresos", "Registro simplificado de ingresos"),
+    ("EGRESOS", "Egresos", "Registro simplificado de egresos"),
+    ("REPORTES_IMPOSITIVOS", "Reportes Impositivos", "Reportes tributarios y de control"),
 ]
 
 PERMISOS_DEFAULT = [
@@ -196,10 +199,89 @@ def _seed_catalogo(conn):
                     (u["id"], maestro["id"]),
                 )
 
+def _seed_persona_fisica_demo(conn):
+    """Crea el tenant de demostración para Persona Física si todavía no existe."""
+    demo = conn.execute(
+        "SELECT id FROM clientes WHERE ruc='1111111-1' LIMIT 1"
+    ).fetchone()
+    if not demo:
+        if os.environ.get("DATABASE_URL"):
+            demo = conn.execute(
+                """INSERT INTO clientes
+                   (ruc,dv,razon_social,nombre_comercial,tipo_persona,documento,estado,tipo_impuesto,tipos_impuesto)
+                   VALUES(?,?,?,?,?,?,?,?,?) RETURNING id""",
+                ("1111111-1","1","KAKUAA PERSONA FISICA DEMO","KAKUAA PERSONA FISICA DEMO","fisica","1111111","activo","IRP-RSP","IRP-RSP,IVA"),
+            ).fetchone()
+        else:
+            demo_id = conn.execute(
+                """INSERT INTO clientes
+                   (ruc,dv,razon_social,nombre_comercial,tipo_persona,documento,estado,tipo_impuesto,tipos_impuesto)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                ("1111111-1","1","KAKUAA PERSONA FISICA DEMO","KAKUAA PERSONA FISICA DEMO","fisica","1111111","activo","IRP-RSP","IRP-RSP,IVA"),
+            ).lastrowid
+            demo = {"id": demo_id}
+
+    cliente_id = int(demo["id"])
+    for codigo in ("IRP",):
+        if os.environ.get("DATABASE_URL"):
+            conn.execute(
+                """INSERT INTO cliente_obligaciones(cliente_id,codigo,activo)
+                   VALUES(?,?,1) ON CONFLICT(cliente_id,codigo) DO UPDATE SET activo=1""",
+                (cliente_id,codigo),
+            )
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO cliente_obligaciones(cliente_id,codigo,activo) VALUES(?,?,1)",
+                (cliente_id,codigo),
+            )
+
+    # La demo de Persona Física nace con la vista simplificada.
+    simplificados = {"INGRESOS", "EGRESOS", "REPORTES_IMPOSITIVOS"}
+    catalogo = {str(r["codigo"]): r["id"] for r in conn.execute("SELECT id,codigo FROM modulos WHERE activo=1").fetchall()}
+    for codigo, modulo_id in catalogo.items():
+        activo = 1 if codigo in simplificados else 0
+        if os.environ.get("DATABASE_URL"):
+            conn.execute(
+                """INSERT INTO cliente_modulos(cliente_id,modulo_id,activo)
+                   VALUES(?,?,?) ON CONFLICT(cliente_id,modulo_id)
+                   DO UPDATE SET activo=EXCLUDED.activo,actualizado_en=CURRENT_TIMESTAMP""",
+                (cliente_id,modulo_id,activo),
+            )
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO cliente_modulos(cliente_id,modulo_id,activo) VALUES(?,?,?)",
+                (cliente_id,modulo_id,activo),
+            )
+            conn.execute(
+                "UPDATE cliente_modulos SET activo=?,actualizado_en=datetime('now') WHERE cliente_id=? AND modulo_id=?",
+                (activo,cliente_id,modulo_id),
+            )
+
+    superadmines = conn.execute("SELECT id FROM usuarios WHERE rol='superadmin' AND activo=1").fetchall()
+    for u in superadmines:
+        if os.environ.get("DATABASE_URL"):
+            conn.execute(
+                """INSERT INTO usuario_clientes(usuario_id,cliente_id,rol_empresa,activo)
+                   VALUES(?,?,?,1) ON CONFLICT(usuario_id,cliente_id)
+                   DO UPDATE SET activo=1,rol_empresa=EXCLUDED.rol_empresa""",
+                (u["id"],cliente_id,"admin"),
+            )
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO usuario_clientes(usuario_id,cliente_id,rol_empresa,activo) VALUES(?,?,?,1)",
+                (u["id"],cliente_id,"admin"),
+            )
+            conn.execute(
+                "UPDATE usuario_clientes SET activo=1,rol_empresa='admin' WHERE usuario_id=? AND cliente_id=?",
+                (u["id"],cliente_id),
+            )
+
+
 def register(app, get_db, staff_required, admin_required, obtener_usuario_por_token):
     conn = get_db()
     try:
         _seed_catalogo(conn)
+        _seed_persona_fisica_demo(conn)
         conn.commit()
     finally:
         conn.close()
