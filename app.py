@@ -1034,10 +1034,22 @@ def _cliente_dict(conn, fila):
     obligaciones = _cliente_obligaciones(conn, fila["id"])
     tipo = str(fila["tipo_persona"] or "juridica").lower()
     tipo_impuesto = str(fila["tipo_impuesto"] or "").strip().upper()
-    perfil = ("PERSONA_JURIDICA" if tipo == "juridica" else
-              "PERSONA_FISICA_IVA_IRP" if tipo_impuesto == "IVA" else
-              "PERSONA_FISICA_IRP" if tipo_impuesto in {"IRP-RSP", "IRP-RGC"} else
-              "PERSONA_FISICA")
+    # El perfil de interfaz se determina por la combinación tributaria completa.
+    # Persona Física con IRE GENERAL + IVA utiliza el ERP contable completo;
+    # las demás combinaciones de Persona Física usan la vista simplificada.
+    impuestos_set = set(impuestos)
+    es_pf_ire_general_iva = (
+        tipo == "fisica"
+        and "IRE GENERAL" in impuestos_set
+        and "IVA" in impuestos_set
+    )
+    perfil = (
+        "PERSONA_JURIDICA"
+        if tipo == "juridica"
+        else "PERSONA_FISICA_IRE_GENERAL_IVA"
+        if es_pf_ire_general_iva
+        else "PERSONA_FISICA_SIMPLE"
+    )
     return {
         "id": fila["id"],
         "ruc": fila["ruc"],
