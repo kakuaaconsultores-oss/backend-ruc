@@ -3595,6 +3595,11 @@ def init_dnit_ruc_db():
 
 init_dnit_ruc_db()
 
+# La limpieza del padrón se ejecuta después de inicializar la estructura,
+# pero antes de que cualquier consulta/sincronización pueda utilizarla.
+# Solo actúa cuando Render tiene DNIT_RUC_PURGE=1.
+_eliminar_tablas_padron_dnit_si_corresponde()
+
 
 def _obtener_estado_dnit():
     conn = get_db()
