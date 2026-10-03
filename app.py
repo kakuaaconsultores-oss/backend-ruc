@@ -1057,6 +1057,7 @@ def _cliente_dict(conn, fila):
     tipo = str(fila["tipo_persona"] or "juridica").lower()
     tipo_impuesto = str(fila["tipo_impuesto"] or "").strip().upper()
     # El perfil de interfaz se determina por la combinación tributaria completa.
+    impuestos = _impuestos_cliente_desde_fila(fila)
     # Persona Física con IRE GENERAL + IVA utiliza el ERP contable completo;
     # las demás combinaciones de Persona Física usan la vista simplificada.
     impuestos_set = set(impuestos)
