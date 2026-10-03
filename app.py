@@ -793,25 +793,43 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
         return False
 
 def obtener_usuario_por_token():
-    """Obtiene el usuario autenticado exclusivamente desde la cookie HttpOnly de sesión."""
-    token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    """Obtiene la sesión priorizando Authorization: Bearer y usando la cookie
+    HttpOnly como respaldo. Así una cookie vieja no invalida un Bearer válido."""
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:].strip() if auth.startswith("Bearer ") else ""
     if not token:
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:].strip()
-    if not token: return None
+        token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if not token:
+        return None
+
     conn = get_db()
-    u = conn.execute("SELECT * FROM usuarios WHERE token_sesion_hash = ?", (hash_token(token),)).fetchone()
-    if not u or not u["activo"]: conn.close(); return None
-    if u["token_expira_en"]:
-        try:
-            if datetime.utcnow() >= datetime.fromisoformat(u["token_expira_en"]):
-                conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
-                conn.commit(); conn.close(); return None
-        except ValueError:
-            conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?", (u["id"],))
-            conn.commit(); conn.close(); return None
-    conn.close(); return u
+    try:
+        u = conn.execute(
+            "SELECT * FROM usuarios WHERE token_sesion_hash = ?",
+            (hash_token(token),)
+        ).fetchone()
+        if not u or not u["activo"]:
+            return None
+
+        if u["token_expira_en"]:
+            try:
+                if datetime.utcnow() >= datetime.fromisoformat(u["token_expira_en"]):
+                    conn.execute(
+                        "UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?",
+                        (u["id"],)
+                    )
+                    conn.commit()
+                    return None
+            except ValueError:
+                conn.execute(
+                    "UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = NULL, csrf_token_hash = NULL, token_expira_en = NULL WHERE id = ?",
+                    (u["id"],)
+                )
+                conn.commit()
+                return None
+        return u
+    finally:
+        conn.close()
 
 def csrf_valido():
     token = request.headers.get(CSRF_HEADER_NAME, "")
