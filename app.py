@@ -795,6 +795,10 @@ def enviar_correo(destinatario, asunto, cuerpo_html):
 def obtener_usuario_por_token():
     """Obtiene el usuario autenticado exclusivamente desde la cookie HttpOnly de sesión."""
     token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
     if not token: return None
     conn = get_db()
     u = conn.execute("SELECT * FROM usuarios WHERE token_sesion_hash = ?", (hash_token(token),)).fetchone()
@@ -1472,7 +1476,7 @@ def verificar_otp():
     token_expira = datetime.utcnow() + timedelta(hours=SESION_HORAS)
     conn.execute("UPDATE usuarios SET token_sesion = NULL, token_sesion_hash = ?, csrf_token_hash = ?, token_expira_en = ?, intentos_fallidos = 0, bloqueo_hasta = NULL WHERE id = ?", (hash_token(token), hash_token(csrf_token), token_expira.isoformat(), row["usuario_id"]))
     conn.commit(); conn.close()
-    response = jsonify({"ok": True, "csrf_token": csrf_token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
+    response = jsonify({"ok": True, "csrf_token": csrf_token, "session_token": token, "debe_cambiar": bool(row["debe_cambiar"]), "usuario": {"id": row["usuario_id"], "usuario": row["usuario"], "ruc": row["ruc"], "nombre": row["nombre"], "correo": row["correo"], "rol": row["rol"]}})
     response.set_cookie(SESSION_COOKIE_NAME, token, max_age=SESION_HORAS * 3600, secure=COOKIE_SECURE, httponly=True, samesite=COOKIE_SAMESITE, path="/")
     return response
 
