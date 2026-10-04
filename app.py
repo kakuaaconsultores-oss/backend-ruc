@@ -3538,7 +3538,7 @@ def init_dnit_ruc_db():
     conn = get_db()
     try:
         id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
-        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "datetime('now')"
+        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "(datetime('now'))"
         conn.execute(f"""CREATE TABLE IF NOT EXISTS dnit_ruc_cache (
             id {id_type},
             ruc TEXT NOT NULL UNIQUE,
