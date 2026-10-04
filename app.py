@@ -685,7 +685,7 @@ def init_sifen_cache_db():
     conn = get_db()
     try:
         id_type = "BIGSERIAL PRIMARY KEY" if DB_BACKEND == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
-        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "datetime('now')"
+        now_default = "(CURRENT_TIMESTAMP::text)" if DB_BACKEND == "postgres" else "(datetime('now'))"
         conn.execute(f"""CREATE TABLE IF NOT EXISTS documentos_electronicos_cache (
             id {id_type}, cliente_id INTEGER NOT NULL, cdc TEXT NOT NULL, xml_original TEXT NOT NULL,
             fecha_emision TEXT DEFAULT '', ruc_emisor TEXT DEFAULT '', razon_social_emisor TEXT DEFAULT '',
