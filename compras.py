@@ -2,6 +2,8 @@ import json
 import os
 import urllib.parse
 import urllib.request
+import re
+from html import unescape
 from datetime import datetime
 from flask import request, jsonify
 from erp_modulos import registrar_ingreso_compra
@@ -16,6 +18,33 @@ TIPOS_COMPROBANTE_DEFAULT = [
 ESTADOS_COMPROBANTE = ["borrador", "registrado", "validado", "pendiente_contabilizar", "contabilizado", "anulado", "pagado"]
 ESTADOS_OC = ["borrador", "emitida", "aprobada", "parcialmente_recibida", "recibida", "cerrada", "anulada"]
 ESTADOS_OP = ["borrador", "solicitada", "aprobada", "pagada", "anulada"]
+MONEDAS_DNIT = [
+    ("PYG", "Guaraní", "₲"), ("USD", "Dólar Estadounidense", "$"),
+    ("BRL", "Real Brasileño", "R$"), ("ARS", "Peso Argentino", "$"),
+    ("JPY", "Yen Japonés", "¥"), ("EUR", "Euro", "€"), ("GBP", "Libra Esterlina", "£"),
+]
+DNIT_COTIZACIONES_URL = "https://www.dnit.gov.py/web/portal-institucional/cotizaciones"
+
+def _numero_dnit(v):
+    return float(str(v).replace(".", "").replace(",", "."))
+
+def _obtener_cotizaciones_dnit(fecha_iso):
+    dt = datetime.fromisoformat(str(fecha_iso)[:10])
+    meses = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    marca = f"Tipos de cambios del mes de {meses[dt.month-1]} {dt.year}"
+    html = urllib.request.urlopen(urllib.request.Request(DNIT_COTIZACIONES_URL, headers={"User-Agent":"KakuaaERP/1.0"}), timeout=20).read().decode("utf-8","ignore")
+    limpio = unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)))
+    pos = limpio.find(marca)
+    if pos < 0: raise ValueError(f"DNIT no publicó la sección de cotizaciones de {meses[dt.month-1]} {dt.year}.")
+    fin = limpio.find("Tipos de cambios del mes de ", pos + len(marca))
+    seccion = limpio[pos:] if fin < 0 else limpio[pos:fin]
+    dia = f"{dt.day:02d}"
+    patron = re.compile(rf"\b{re.escape(dia)}\b\s+((?:[0-9][0-9.]*,[0-9]+\s+){{11}}[0-9][0-9.]*,[0-9]+)")
+    m = patron.search(seccion)
+    if not m: raise ValueError(f"DNIT no tiene cotización para {fecha_iso}.")
+    vals = m.group(1).split()
+    return {c: {"compra": _numero_dnit(vals[i*2]), "venta": _numero_dnit(vals[i*2+1])} for i,c in enumerate(["USD","BRL","ARS","JPY","EUR","GBP"])}
+
 
 def _now():
     return datetime.utcnow().isoformat(timespec="seconds")
@@ -50,6 +79,16 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'dias', dias_credito INTEGER NOT NULL DEFAULT 0, cuotas INTEGER NOT NULL DEFAULT 1, activo INTEGER NOT NULL DEFAULT 1,
                 creado_en TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(cliente_id,codigo))""")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS monedas (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
+                nombre TEXT NOT NULL, simbolo TEXT DEFAULT '', activo INTEGER NOT NULL DEFAULT 1,
+                fuente TEXT DEFAULT 'SISTEMA', creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(cliente_id,codigo))""")
+            conn.execute(f"""CREATE TABLE IF NOT EXISTS cotizaciones_moneda (
+                id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, moneda_id INTEGER NOT NULL,
+                fecha TEXT NOT NULL, compra REAL NOT NULL DEFAULT 0, venta REAL NOT NULL DEFAULT 0,
+                fuente TEXT DEFAULT 'DNIT', actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(moneda_id,fecha))""")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS formas_pago_compra (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, codigo TEXT NOT NULL,
                 nombre TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'contado', cuenta_contable_id INTEGER DEFAULT NULL,
@@ -152,6 +191,16 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
             if not _column_exists("comprobantes_compra", "centro_costo_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN centro_costo_id INTEGER")
+            for col, definition in (
+                ("moneda_codigo", "TEXT NOT NULL DEFAULT 'PYG'"),
+                ("tipo_cambio", "REAL NOT NULL DEFAULT 1"),
+                ("tipo_cambio_fuente", "TEXT DEFAULT 'SISTEMA'"),
+                ("tipo_cambio_fecha", "TEXT DEFAULT NULL"),
+                ("total_moneda", "REAL NOT NULL DEFAULT 0"),
+                ("total_gs", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if not _column_exists("comprobantes_compra", col):
+                    conn.execute(f"ALTER TABLE comprobantes_compra ADD COLUMN {col} {definition}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
@@ -307,6 +356,99 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             return dict(row),""
         return None,"El número no corresponde a ningún timbrado activo del proveedor para ese tipo, rango y fecha."
 
+
+    def _asegurar_monedas(conn, cid):
+        for codigo,nombre,simbolo in MONEDAS_DNIT:
+            conn.execute("""INSERT INTO monedas(cliente_id,codigo,nombre,simbolo,activo,fuente)
+                VALUES(?,?,?,?,1,'SISTEMA') ON CONFLICT (cliente_id,codigo) DO NOTHING""",
+                (cid,codigo,nombre,simbolo))
+
+    @app.get("/api/banca/monedas")
+    @usuario_required
+    def listar_monedas_banca():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            _asegurar_monedas(conn,cid); conn.commit()
+            return jsonify([dict(x) for x in conn.execute("SELECT * FROM monedas WHERE cliente_id=? ORDER BY activo DESC,codigo",(cid,)).fetchall()])
+        finally: conn.close()
+
+    @app.post("/api/banca/monedas")
+    @staff_required
+    def crear_moneda_banca():
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            codigo=str(d.get("codigo") or "").strip().upper()
+            nombre=str(d.get("nombre") or "").strip()
+            simbolo=str(d.get("simbolo") or "").strip()
+            if not re.fullmatch(r"[A-Z]{3}",codigo): return jsonify({"error":"El código ISO debe tener 3 letras."}),400
+            if not nombre:return jsonify({"error":"El nombre de la moneda es obligatorio."}),400
+            if conn.execute("SELECT id FROM monedas WHERE cliente_id=? AND codigo=?",(cid,codigo)).fetchone(): return jsonify({"error":"La moneda ya existe para este cliente."}),400
+            mid=insertar_id(conn,"INSERT INTO monedas(cliente_id,codigo,nombre,simbolo,activo,fuente) VALUES(?,?,?,?,1,'MANUAL')",[cid,codigo,nombre,simbolo])
+            conn.commit(); return jsonify({"id":mid}),201
+        except Exception as e:
+            conn.rollback(); return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.put("/api/banca/monedas/<int:moneda_id>")
+    @staff_required
+    def actualizar_moneda_banca(moneda_id):
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            row=conn.execute("SELECT * FROM monedas WHERE id=? AND cliente_id=?",(moneda_id,cid)).fetchone()
+            if not row:return jsonify({"error":"Moneda no encontrada."}),404
+            activo=1 if d.get("activo",True) else 0
+            nombre=str(d.get("nombre") or row["nombre"]).strip()
+            simbolo=str(d.get("simbolo") if d.get("simbolo") is not None else row["simbolo"] or "").strip()
+            conn.execute("UPDATE monedas SET nombre=?,simbolo=?,activo=? WHERE id=? AND cliente_id=?",(nombre,simbolo,activo,moneda_id,cid))
+            conn.commit();return jsonify({"ok":True})
+        except Exception as e:
+            conn.rollback();return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.get("/api/banca/cotizaciones")
+    @usuario_required
+    def listar_cotizaciones_banca():
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            _asegurar_monedas(conn,cid)
+            fecha=str(request.args.get("fecha") or datetime.now().date().isoformat())[:10]
+            monedas=conn.execute("SELECT * FROM monedas WHERE cliente_id=? AND activo=1 ORDER BY codigo",(cid,)).fetchall()
+            try:
+                dnit=_obtener_cotizaciones_dnit(fecha)
+                for m in monedas:
+                    codigo=m["codigo"]
+                    if codigo=="PYG": compra=venta=1.0
+                    elif codigo in dnit: compra=dnit[codigo]["compra"]; venta=dnit[codigo]["venta"]
+                    else: continue
+                    conn.execute("""INSERT INTO cotizaciones_moneda(cliente_id,moneda_id,fecha,compra,venta,fuente)
+                        VALUES(?,?,?,?,?,'DNIT')
+                        ON CONFLICT (moneda_id,fecha) DO UPDATE SET compra=excluded.compra,venta=excluded.venta,fuente='DNIT',actualizado_en=CURRENT_TIMESTAMP""",
+                        (cid,m["id"],fecha,compra,venta))
+                conn.commit()
+            except Exception:
+                pass
+            rows=conn.execute("""SELECT m.codigo,m.nombre,m.simbolo,c.fecha,c.compra,c.venta,c.fuente
+                FROM monedas m LEFT JOIN cotizaciones_moneda c ON c.moneda_id=m.id AND c.fecha=?
+                WHERE m.cliente_id=? AND m.activo=1 ORDER BY m.codigo""",(fecha,cid)).fetchall()
+            return jsonify({"fecha":fecha,"fuente":"DNIT","cotizaciones":[dict(x) for x in rows]})
+        finally: conn.close()
+
+    @app.get("/api/banca/cotizacion/<codigo>")
+    @usuario_required
+    def obtener_cotizacion_banca(codigo):
+        fecha=str(request.args.get("fecha") or datetime.now().date().isoformat())[:10]
+        data=listar_cotizaciones_banca().json
+        row=next((x for x in (data or {}).get("cotizaciones",[]) if str(x["codigo"]).upper()==str(codigo).upper()),None)
+        if not row:return jsonify({"error":"No existe cotización para la moneda seleccionada en la fecha indicada."}),404
+        return jsonify(row)
 
     @app.get("/api/compras/catalogos")
     @usuario_required
@@ -1078,13 +1220,18 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             required=["proveedor_id","numero","fecha"]
             if any(d.get(x) in (None,"") for x in required): return jsonify({"error":"Proveedor, número y fecha son obligatorios."}),400
             if int(d["proveedor_id"]) and not conn.execute("SELECT 1 FROM proveedores WHERE id=? AND cliente_id=?",(int(d["proveedor_id"]),cid)).fetchone(): return jsonify({"error":"Proveedor inválido."}),400
-            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","centro_costo_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
+            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","centro_costo_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","moneda_codigo","tipo_cambio","tipo_cambio_fuente","tipo_cambio_fecha","total_moneda","total_gs","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por"]
             timbrado,terr=_validar_timbrado(conn,cid,int(d["proveedor_id"]),d.get("tipo_comprobante_id"),d["numero"],d["fecha"],d.get("timbrado_id"))
             if terr:return jsonify({"error":terr}),400
             centro_costo_id=d.get("centro_costo_id") or None
             if centro_costo_id and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_costo_id),cid)).fetchone():
                 return jsonify({"error":"El centro de costo seleccionado no existe, pertenece a otra empresa o está inactivo."}),400
-            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),d.get("moneda","PYG"),float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),float(d.get("total",0) or 0),d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
+            moneda_codigo=str(d.get("moneda_codigo") or d.get("moneda") or "PYG").upper()
+            tipo_cambio=float(d.get("tipo_cambio",1) or 1)
+            total_moneda=round(float(d.get("total_moneda",d.get("total",0)) or 0),2)
+            if moneda_codigo=="PYG": tipo_cambio=1; total_gs=round(total_moneda)
+            else: total_gs=round(total_moneda*tipo_cambio)
+            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),moneda_codigo,moneda_codigo,tipo_cambio,d.get("tipo_cambio_fuente","DNIT" if moneda_codigo!="PYG" else "SISTEMA"),d.get("tipo_cambio_fecha") or d["fecha"],total_moneda,total_gs,float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),total_gs,d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
             cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
             if d.get("condicion_id"):
                 condicion=conn.execute("SELECT * FROM condiciones_compra WHERE id=? AND cliente_id=? AND activo=1",(int(d["condicion_id"]),cid)).fetchone()
@@ -1094,7 +1241,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 tipo_cond=(condicion["tipo"] or "dias").lower()
                 cantidad=int(condicion["cuotas"] or 1) if tipo_cond=="cuotas" else 1
                 fechas=[fecha_base+timedelta(days=30*(i+1)) for i in range(cantidad)] if tipo_cond=="cuotas" else [fecha_base+timedelta(days=int(condicion["dias_credito"] or 0))]
-                total=float(d.get("total",0) or 0); base=round(total/cantidad,2)
+                total=float(total_gs); base=round(total/cantidad,2)
                 for i,venc in enumerate(fechas,1):
                     importe=base if i<cantidad else round(total-base*(cantidad-1),2)
                     conn.execute("INSERT INTO cuotas_compras(cliente_id,comprobante_id,numero_cuota,fecha_vencimiento,importe,saldo,estado) VALUES(?,?,?,?,?,?,?)",(cid,cidc,i,venc.isoformat(),importe,importe,"pendiente"))
