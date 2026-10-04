@@ -1208,11 +1208,14 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
         try:
             cid,err=_cliente_id(conn)
             if err:return jsonify({"error":err}),401
-            rows=conn.execute("""SELECT c.*,p.razon_social proveedor,t.nombre tipo_nombre,
-                cc.codigo centro_costo_codigo,cc.nombre centro_costo_nombre
+            rows=conn.execute("""SELECT c.*,p.razon_social proveedor,t.nombre tipo_nombre,t.codigo tipo_codigo,
+                cc.codigo centro_costo_codigo,cc.nombre centro_costo_nombre,
+                cr.numero factura_relacionada_numero,cr.fecha factura_relacionada_fecha,
+                cr.cdc factura_relacionada_cdc
                 FROM comprobantes_compra c JOIN proveedores p ON p.id=c.proveedor_id
                 LEFT JOIN tipos_comprobante_compra t ON t.id=c.tipo_comprobante_id
                 LEFT JOIN centros_costos cc ON cc.id=c.centro_costo_id AND cc.cliente_id=c.cliente_id
+                LEFT JOIN comprobantes_compra cr ON cr.id=c.comprobante_relacionado_id AND cr.cliente_id=c.cliente_id
                 WHERE c.cliente_id=? ORDER BY c.fecha DESC,c.id DESC""",(cid,)).fetchall()
             return jsonify([dict(x) for x in rows])
         finally: conn.close()
