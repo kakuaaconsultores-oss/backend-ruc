@@ -38,11 +38,10 @@ def _obtener_cotizaciones_dnit(fecha_iso):
     if pos < 0: raise ValueError(f"DNIT no publicó la sección de cotizaciones de {meses[dt.month-1]} {dt.year}.")
     fin = limpio.find("Tipos de cambios del mes de ", pos + len(marca))
     seccion = limpio[pos:] if fin < 0 else limpio[pos:fin]
-    dia = f"{dt.day:02d}"
-    patron = re.compile(rf"\b{re.escape(dia)}\b\s+((?:[0-9][0-9.]*,[0-9]+\s+){{11}}[0-9][0-9.]*,[0-9]+)")
-    m = patron.search(seccion)
-    if not m: raise ValueError(f"DNIT no tiene cotización para {fecha_iso}.")
-    vals = m.group(1).split()
+    patron = re.compile(r"\b(\d{1,2})\b\s+((?:[0-9][0-9.]*,[0-9]+\s+){11}[0-9][0-9.]*,[0-9]+)")
+    candidatos = [(int(m.group(1)), m.group(2).split()) for m in patron.finditer(seccion) if int(m.group(1)) <= dt.day]
+    if not candidatos: raise ValueError(f"DNIT no tiene cotización para {fecha_iso}.")
+    _, vals = max(candidatos, key=lambda x: x[0])
     return {c: {"compra": _numero_dnit(vals[i*2]), "venta": _numero_dnit(vals[i*2+1])} for i,c in enumerate(["USD","BRL","ARS","JPY","EUR","GBP"])}
 
 
