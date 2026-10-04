@@ -4133,8 +4133,15 @@ def _parse_dte_xml(xml_text):
         raw=_xml_text(root,names).replace(".","").replace(",",".")
         try:return float(raw or 0)
         except ValueError:return 0.0
+    tipo_codigo=_xml_text(root,["iTiDE","c002"])
+    tipo_nombre=_xml_text(root,["dDesTiDE","dDesTipDE"])
+    if not tipo_codigo and len(cdc)==44:
+        tipo_codigo=cdc[:2].lstrip("0") or "0"
+    tipo_mapa={"1":"FACTURA","01":"FACTURA","4":"AUTOFACTURA","04":"AUTOFACTURA","5":"NOTA_CREDITO","05":"NOTA_CREDITO","6":"NOTA_DEBITO","06":"NOTA_DEBITO","7":"NOTA_REMISION","07":"NOTA_REMISION"}
     return {
         "cdc":cdc,
+        "tipo_documento":tipo_mapa.get(str(tipo_codigo),tipo_nombre or "FACTURA"),
+        "tipo_documento_codigo":str(tipo_codigo or ""),
         "fecha_emision":_xml_text(root,["dFeEmiDE"]),
         "ruc_emisor":_xml_text(root,["dRucEm"]),
         "razon_social_emisor":_xml_text(root,["dNomEmi","dRazSocEm"]),
