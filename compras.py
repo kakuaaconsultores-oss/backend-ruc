@@ -197,11 +197,19 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 ("tipo_cambio_fecha", "TEXT DEFAULT NULL"),
                 ("total_moneda", "REAL NOT NULL DEFAULT 0"),
                 ("total_gs", "REAL NOT NULL DEFAULT 0"),
+                # Relación documental para Notas de Crédito/Débito.
+                # Es una referencia interna al comprobante original y conserva
+                # además los datos fiscales del documento relacionado como respaldo.
+                ("comprobante_relacionado_id", "INTEGER DEFAULT NULL"),
+                ("cdc_relacionado", "TEXT DEFAULT ''"),
+                ("timbrado_relacionado", "TEXT DEFAULT ''"),
+                ("motivo_nc", "TEXT DEFAULT ''"),
             ):
                 if not _column_exists("comprobantes_compra", col):
                     conn.execute(f"ALTER TABLE comprobantes_compra ADD COLUMN {col} {definition}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_cliente_fecha ON comprobantes_compra(cliente_id, fecha, estado)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_proveedor ON comprobantes_compra(proveedor_id, fecha)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_compras_relacionado ON comprobantes_compra(cliente_id, comprobante_relacionado_id)")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS comprobantes_compra_detalle (
                 id {id_col} PRIMARY KEY, comprobante_id INTEGER NOT NULL, concepto_id INTEGER,
                 descripcion TEXT NOT NULL, cantidad REAL NOT NULL DEFAULT 1, precio_unitario REAL NOT NULL DEFAULT 0,
@@ -1408,6 +1416,146 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             conn.commit();return jsonify({"ok":True})
         except Exception as e:
             conn.rollback();return jsonify({"error":str(e)}),400
+        finally: conn.close()
+
+    @app.get("/api/compras/facturas-relacionables")
+    @usuario_required
+    def listar_facturas_relacionables():
+        """Facturas recibidas de un proveedor disponibles para asociar una NC."""
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            proveedor_id=request.args.get("proveedor_id")
+            anio=str(request.args.get("anio") or "").strip()
+            mes=str(request.args.get("mes") or "").strip()
+            if not proveedor_id:
+                return jsonify([])
+            try: proveedor_id=int(proveedor_id)
+            except (TypeError,ValueError): return jsonify({"error":"Proveedor inválido."}),400
+            params=[cid,proveedor_id]
+            q="""SELECT c.id,c.fecha,c.numero,c.cdc,c.moneda,c.moneda_codigo,c.tipo_cambio,
+                         c.tipo_cambio_fuente,c.tipo_cambio_fecha,c.total,c.total_moneda,c.total_gs,
+                         c.gravado_10,c.gravado_5,c.exento,c.iva_10,c.iva_5,
+                         c.timbrado_id,pt.numero_timbrado AS timbrado_relacionado,
+                         p.razon_social proveedor,p.ruc,
+                         COALESCE((
+                           SELECT SUM(nc.total_gs) FROM comprobantes_compra nc
+                           JOIN tipos_comprobante_compra tnc ON tnc.id=nc.tipo_comprobante_id
+                           WHERE nc.cliente_id=c.cliente_id
+                             AND nc.comprobante_relacionado_id=c.id
+                             AND LOWER(COALESCE(tnc.codigo,''))='NOTA_CREDITO'
+                             AND nc.estado<>'anulado'
+                         ),0) AS total_nc
+                  FROM comprobantes_compra c
+                  JOIN proveedores p ON p.id=c.proveedor_id
+                  JOIN tipos_comprobante_compra tc ON tc.id=c.tipo_comprobante_id
+                  LEFT JOIN proveedor_timbrados pt ON pt.id=c.timbrado_id AND pt.cliente_id=c.cliente_id
+                  WHERE c.cliente_id=? AND c.proveedor_id=?
+                    AND LOWER(COALESCE(tc.codigo,''))='FACTURA'
+                    AND c.estado<>'anulado'"""
+            if anio:
+                if not anio.isdigit() or len(anio)!=4:return jsonify({"error":"Año inválido."}),400
+                q+=" AND substr(c.fecha,1,4)=?";params.append(anio)
+            if mes:
+                if not mes.isdigit() or not 1<=int(mes)<=12:return jsonify({"error":"Mes inválido."}),400
+                q+=" AND substr(c.fecha,6,2)=?";params.append(str(int(mes)).zfill(2))
+            q+=" ORDER BY c.fecha DESC,c.id DESC"
+            rows=[]
+            for x in conn.execute(q,params).fetchall():
+                d=dict(x)
+                total_gs=float(d.get("total_gs") or d.get("total") or 0)
+                aplicado=float(d.get("total_nc") or 0)
+                d["saldo_nc"]=max(0,round(total_gs-aplicado))
+                d["puede_recibir_nc"]=d["saldo_nc"]>0
+                rows.append(d)
+            return jsonify(rows)
+        finally:
+            conn.close()
+
+    @app.get("/api/compras/comprobantes/<int:comp_id>/relacion")
+    @usuario_required
+    def detalle_factura_relacionable(comp_id):
+        conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return error_response(err) if 'error_response' in globals() else (jsonify({"error":err}),401)
+            factura=conn.execute("""SELECT c.*,p.razon_social proveedor,p.ruc,
+                    t.codigo tipo_codigo,t.nombre tipo_nombre,
+                    pt.numero_timbrado timbrado_relacionado
+                FROM comprobantes_compra c
+                JOIN proveedores p ON p.id=c.proveedor_id
+                JOIN tipos_comprobante_compra t ON t.id=c.tipo_comprobante_id
+                LEFT JOIN proveedor_timbrados pt ON pt.id=c.timbrado_id AND pt.cliente_id=c.cliente_id
+                WHERE c.id=? AND c.cliente_id=? AND LOWER(COALESCE(t.codigo,''))='FACTURA'""",(comp_id,cid)).fetchone()
+            if not factura:return jsonify({"error":"La factura relacionada no existe o no está disponible."}),404
+            det=conn.execute("""SELECT d.*,i.codigo item_codigo,i.nombre item_nombre
+                FROM comprobantes_compra_detalle d
+                LEFT JOIN inventario_items i ON i.id=d.item_id
+                WHERE d.comprobante_id=? ORDER BY d.id""",(comp_id,)).fetchall()
+            aplicado=conn.execute("""SELECT COALESCE(SUM(nc.total_gs),0) total_nc
+                FROM comprobantes_compra nc
+                JOIN tipos_comprobante_compra tnc ON tnc.id=nc.tipo_comprobante_id
+                WHERE nc.cliente_id=? AND nc.comprobante_relacionado_id=?
+                  AND LOWER(COALESCE(tnc.codigo,''))='NOTA_CREDITO' AND nc.estado<>'anulado'""",(cid,comp_id)).fetchone()
+            f=dict(factura); f["total_nc"]=float(aplicado["total_nc"] or 0); f["saldo_nc"]=max(0,round(float(f.get("total_gs") or f.get("total") or 0)-f["total_nc"]))
+            return jsonify({"factura":f,"detalle":[dict(x) for x in det]})
+        finally: conn.close()
+
+    @app.post("/api/compras/notas-credito")
+    @staff_required
+    def crear_nota_credito_compra():
+        d=parse_json(); conn=get_db()
+        try:
+            cid,err=_cliente_id(conn)
+            if err:return jsonify({"error":err}),401
+            proveedor_id=int(d.get("proveedor_id") or 0)
+            relacionada_id=int(d.get("comprobante_relacionado_id") or 0)
+            if not proveedor_id or not relacionada_id or not d.get("numero") or not d.get("fecha"):
+                return jsonify({"error":"Proveedor, factura relacionada, número y fecha son obligatorios."}),400
+            proveedor=conn.execute("SELECT * FROM proveedores WHERE id=? AND cliente_id=? AND estado='activo'",(proveedor_id,cid)).fetchone()
+            if not proveedor:return jsonify({"error":"Proveedor inválido."}),400
+            factura=conn.execute("""SELECT c.*,t.codigo tipo_codigo,t.nombre tipo_nombre,
+                    pt.numero_timbrado timbrado_relacionado
+                FROM comprobantes_compra c
+                JOIN tipos_comprobante_compra t ON t.id=c.tipo_comprobante_id
+                LEFT JOIN proveedor_timbrados pt ON pt.id=c.timbrado_id AND pt.cliente_id=c.cliente_id
+                WHERE c.id=? AND c.cliente_id=? AND c.proveedor_id=?
+                  AND LOWER(COALESCE(t.codigo,''))='FACTURA' AND c.estado<>'anulado'""",(relacionada_id,cid,proveedor_id)).fetchone()
+            if not factura:return jsonify({"error":"No se puede registrar la Nota de Crédito: primero debe existir una factura válida del proveedor y estar cargada en Kakuaa."}),400
+            aplicado=conn.execute("""SELECT COALESCE(SUM(nc.total_gs),0) total_nc
+                FROM comprobantes_compra nc
+                JOIN tipos_comprobante_compra tnc ON tnc.id=nc.tipo_comprobante_id
+                WHERE nc.cliente_id=? AND nc.comprobante_relacionado_id=?
+                  AND LOWER(COALESCE(tnc.codigo,''))='NOTA_CREDITO' AND nc.estado<>'anulado'""",(cid,relacionada_id)).fetchone()
+            saldo=max(0,round(float(factura["total_gs"] or factura["total"] or 0)-float(aplicado["total_nc"] or 0)))
+            moneda_codigo=str(d.get("moneda_codigo") or factura["moneda_codigo"] or factura["moneda"] or "PYG").upper()
+            tipo_cambio=float(d.get("tipo_cambio",factura["tipo_cambio"] or 1) or 1)
+            total_moneda=round(float(d.get("total_moneda",d.get("total",0)) or 0),2)
+            total_gs=round(total_moneda if moneda_codigo=="PYG" else total_moneda*tipo_cambio)
+            if total_gs<=0:return jsonify({"error":"La Nota de Crédito debe tener un total mayor que cero."}),400
+            if total_gs>saldo:return jsonify({"error":f"La Nota de Crédito supera el saldo disponible de la factura. Saldo disponible: G. {saldo:,.0f}."}),400
+            if moneda_codigo!=str(factura["moneda_codigo"] or factura["moneda"] or "PYG").upper():
+                return jsonify({"error":"La Nota de Crédito debe utilizar la misma moneda que la factura relacionada."}),400
+            tipo_nc=conn.execute("SELECT id FROM tipos_comprobante_compra WHERE cliente_id=? AND LOWER(codigo)='NOTA_CREDITO' AND activo=1",(cid,)).fetchone()
+            if not tipo_nc:return jsonify({"error":"No está configurado el tipo de comprobante Nota de Crédito."}),400
+            timbrado,terr=_validar_timbrado(conn,cid,proveedor_id,tipo_nc["id"],d["numero"],d["fecha"],d.get("timbrado_id"))
+            if terr:return jsonify({"error":terr}),400
+            centro_costo_id=d.get("centro_costo_id") or None
+            if centro_costo_id and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_costo_id),cid)).fetchone():
+                return jsonify({"error":"El centro de costo seleccionado no existe, pertenece a otra empresa o está inactivo."}),400
+            cols=["cliente_id","proveedor_id","tipo_comprobante_id","timbrado_id","centro_costo_id","numero","cdc","fecha","condicion_id","forma_pago_id","estado","moneda","moneda_codigo","tipo_cambio","tipo_cambio_fuente","tipo_cambio_fecha","total_moneda","total_gs","gravado_10","gravado_5","exento","iva_10","iva_5","total","orden_compra_id","origen","observacion","creado_por","comprobante_relacionado_id","cdc_relacionado","timbrado_relacionado","motivo_nc"]
+            vals=[cid,proveedor_id,tipo_nc["id"],timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],None,None,d.get("estado","registrado"),moneda_codigo,moneda_codigo,tipo_cambio,d.get("tipo_cambio_fuente",factura["tipo_cambio_fuente"] or "DNIT" if moneda_codigo!="PYG" else "SISTEMA"),d.get("tipo_cambio_fecha") or d["fecha"],total_moneda,total_gs,float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),total_gs,None,d.get("origen","MANUAL"),d.get("observacion",""),None,relacionada_id,factura["cdc"] or "",factura["timbrado_relacionado"] or "",str(d.get("motivo_nc") or "").strip()]
+            ncid=insertar_id(conn,"INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")",vals)
+            for item in d.get("detalle",[]):
+                centro_detalle=item.get("centro_costo_id") or centro_costo_id
+                if centro_detalle and not conn.execute("SELECT 1 FROM centros_costos WHERE id=? AND cliente_id=? AND activo=1",(int(centro_detalle),cid)).fetchone():
+                    return jsonify({"error":"El centro de costo de una línea no existe, pertenece a otra empresa o está inactivo."}),400
+                conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,item_id,deposito_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id,centro_costo_id)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(ncid,item.get("concepto_id") or None,item.get("item_id") or None,item.get("deposito_id") or None,item.get("descripcion",""),float(item.get("cantidad",1) or 1),float(item.get("precio_unitario",0) or 0),float(item.get("iva_tasa",0) or 0),float(item.get("subtotal",0) or 0),item.get("cuenta_contable_id") or None,centro_detalle))
+            conn.commit(); return jsonify({"id":ncid,"comprobante_relacionado_id":relacionada_id}),201
+        except Exception as e:
+            conn.rollback(); return jsonify({"error":str(e)}),400
         finally: conn.close()
 
     @app.post("/api/compras/comprobantes/<int:comp_id>/estado")
