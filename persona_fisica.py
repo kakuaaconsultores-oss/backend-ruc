@@ -26,7 +26,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         return cliente_id, None
 
     def _init(conn):
-        conn.execute("""CREATE TABLE IF NOT EXISTS pf_medios_pago(
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_medios_pago(
             id {idc},
             cliente_id INTEGER NOT NULL,
             nombre TEXT NOT NULL,
@@ -35,7 +35,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(cliente_id,nombre)
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS pf_categorias(
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_categorias(
             id {idc},
             cliente_id INTEGER NOT NULL,
             nombre TEXT NOT NULL,
@@ -44,7 +44,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(cliente_id,nombre,tipo)
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS pf_operaciones(
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_operaciones(
             id {idc},
             cliente_id INTEGER NOT NULL,
             tipo TEXT NOT NULL,
@@ -66,7 +66,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS pf_movimientos_pago(
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_movimientos_pago(
             id {idc},
             operacion_id INTEGER NOT NULL,
             cliente_id INTEGER NOT NULL,
