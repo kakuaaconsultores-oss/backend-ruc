@@ -7,3 +7,6 @@ register(app, get_db, staff_required, usuario_required, insertar_y_obtener_id)
 
 from multiempresa import register as register_multiempresa
 register_multiempresa(app, get_db, staff_required, admin_required, obtener_usuario_por_token)
+
+from aprobacion_compras import register as register_aprobacion_compras
+register_aprobacion_compras(app, get_db, staff_required, admin_required, insertar_y_obtener_id, obtener_usuario_por_token)
