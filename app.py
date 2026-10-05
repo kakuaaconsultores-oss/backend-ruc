@@ -4378,7 +4378,7 @@ def api_sifen_consulta_qr():
     }),200
 
 # Módulo simplificado para clientes Persona Física.
-registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin_required)
+registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin_required, DB_BACKEND)
 
 if __name__ == "__main__":
 
