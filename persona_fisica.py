@@ -4,7 +4,8 @@
 # Ingresos/Egresos -> Cobros/Pagos -> impuestos/reportes.
 # No crea banca, presupuestos ni flujo de fondos.
 
-def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin_required):
+def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin_required, db_backend='sqlite'):
+    idc = 'BIGSERIAL PRIMARY KEY' if db_backend == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
     def _cliente_pf():
         cliente_id, error = obtener_cliente_contable()
         if error:
@@ -26,7 +27,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
 
     def _init(conn):
         conn.execute("""CREATE TABLE IF NOT EXISTS pf_medios_pago(
-            id INTEGER PRIMARY KEY,
+            id {idc},
             cliente_id INTEGER NOT NULL,
             nombre TEXT NOT NULL,
             tipo TEXT NOT NULL DEFAULT 'OTRO',
@@ -35,7 +36,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             UNIQUE(cliente_id,nombre)
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS pf_categorias(
-            id INTEGER PRIMARY KEY,
+            id {idc},
             cliente_id INTEGER NOT NULL,
             nombre TEXT NOT NULL,
             tipo TEXT NOT NULL,
@@ -44,7 +45,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             UNIQUE(cliente_id,nombre,tipo)
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS pf_operaciones(
-            id INTEGER PRIMARY KEY,
+            id {idc},
             cliente_id INTEGER NOT NULL,
             tipo TEXT NOT NULL,
             fecha TEXT NOT NULL,
@@ -66,7 +67,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS pf_movimientos_pago(
-            id INTEGER PRIMARY KEY,
+            id {idc},
             operacion_id INTEGER NOT NULL,
             cliente_id INTEGER NOT NULL,
             tipo TEXT NOT NULL,
@@ -98,7 +99,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         _init(conn)
         conn.commit()
 
-    @app.get("/api/persona-fisica/resumen")
+    # PostgreSQL y SQLite comparten la misma API; las tablas se crean al primer uso del módulo.\n    @app.get("/api/persona-fisica/resumen")
     @admin_required
     def pf_resumen():
         cid, error = _cliente_pf()
@@ -222,7 +223,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
                  str(d.get("tercero") or ""),str(d.get("tercero_ruc") or ""),concepto,d.get("categoria_id") or None,monto,
                  str(d.get("moneda") or "PYG").upper(),estado,str(d.get("origen") or "MANUAL"),d.get("origen_id") or None,
                  d.get("medio_pago_id") or None,str(d.get("observacion") or "")))
-            op_id=cur.lastrowid
+            op_id=conn.execute("SELECT id FROM pf_operaciones WHERE cliente_id=? ORDER BY id DESC LIMIT 1",(cid,)).fetchone()["id"]
             conn.commit()
             return jsonify({"ok":True,"id":op_id})
         except Exception as exc:
