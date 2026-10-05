@@ -36,6 +36,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from erp_modulos import stock_suficiente_para_venta, registrar_salida_venta
 from sifen_consulta import consultar_cdc_sifen
 from sifen_publica import validar_cdc as validar_cdc_publica, extraer_cdc_de_qr, consulta_publica_info
+from persona_fisica import registrar_modulo_persona_fisica
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -4375,6 +4376,9 @@ def api_sifen_consulta_qr():
         "cache":False,
         **info,
     }),200
+
+# Módulo simplificado para clientes Persona Física.
+registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin_required)
 
 if __name__ == "__main__":
 
