@@ -15,7 +15,7 @@ TIPOS_COMPROBANTE_DEFAULT = [
     ("RECIBO", "Recibo", 1),
     ("OTRO", "Otro", 1),
 ]
-ESTADOS_COMPROBANTE = ["borrador", "registrado", "validado", "pendiente_contabilizar", "contabilizado", "anulado", "pagado"]
+ESTADOS_COMPROBANTE = ["borrador", "registrado", "validado", "pendiente_contabilizar", "en_revision", "contabilizado", "rechazado", "anulado", "pagado"]
 ESTADOS_OC = ["borrador", "emitida", "aprobada", "parcialmente_recibida", "recibida", "cerrada", "anulada"]
 ESTADOS_OP = ["borrador", "solicitada", "aprobada", "pagada", "anulada"]
 MONEDAS_DNIT = [
@@ -188,6 +188,8 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP)""")
             if not _column_exists("comprobantes_compra", "timbrado_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN timbrado_id INTEGER")
+            for col, definition in (("asiento_id","INTEGER DEFAULT NULL"),("contabilizacion_usuario_id","INTEGER DEFAULT NULL"),("contabilizacion_en","TEXT DEFAULT NULL"),("rechazo_motivo","TEXT DEFAULT ''"),("rechazado_por","INTEGER DEFAULT NULL"),("rechazado_en","TEXT DEFAULT NULL")):
+                if not _column_exists("comprobantes_compra", col): conn.execute(f"ALTER TABLE comprobantes_compra ADD COLUMN {col} {definition}")
             if not _column_exists("comprobantes_compra", "centro_costo_id"):
                 conn.execute("ALTER TABLE comprobantes_compra ADD COLUMN centro_costo_id INTEGER")
             for col, definition in (
@@ -1241,7 +1243,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
             total_moneda=round(float(d.get("total_moneda",d.get("total",0)) or 0),2)
             if moneda_codigo=="PYG": tipo_cambio=1; total_gs=round(total_moneda)
             else: total_gs=round(total_moneda*tipo_cambio)
-            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),d.get("estado","registrado"),moneda_codigo,moneda_codigo,tipo_cambio,d.get("tipo_cambio_fuente","DNIT" if moneda_codigo!="PYG" else "SISTEMA"),d.get("tipo_cambio_fecha") or d["fecha"],total_moneda,total_gs,float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),total_gs,d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
+            vals=[cid,d["proveedor_id"],d.get("tipo_comprobante_id"),timbrado["id"],centro_costo_id,d["numero"],d.get("cdc",""),d["fecha"],d.get("condicion_id"),d.get("forma_pago_id"),("borrador" if str(d.get("estado") or "").lower()=="borrador" else "pendiente_contabilizar"),moneda_codigo,moneda_codigo,tipo_cambio,d.get("tipo_cambio_fuente","DNIT" if moneda_codigo!="PYG" else "SISTEMA"),d.get("tipo_cambio_fecha") or d["fecha"],total_moneda,total_gs,float(d.get("gravado_10",0) or 0),float(d.get("gravado_5",0) or 0),float(d.get("exento",0) or 0),float(d.get("iva_10",0) or 0),float(d.get("iva_5",0) or 0),total_gs,d.get("orden_compra_id"),d.get("origen","MANUAL"),d.get("observacion",""),None]
             cidc=insertar_id(conn, "INSERT INTO comprobantes_compra("+",".join(cols)+") VALUES("+",".join(["?"]*len(cols))+")", vals)
             if d.get("condicion_id"):
                 condicion=conn.execute("SELECT * FROM condiciones_compra WHERE id=? AND cliente_id=? AND activo=1",(int(d["condicion_id"]),cid)).fetchone()
@@ -1284,7 +1286,7 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                         return jsonify({"error":"El depósito seleccionado no existe o está inactivo."}),400
                 conn.execute("""INSERT INTO comprobantes_compra_detalle(comprobante_id,concepto_id,item_id,deposito_id,descripcion,cantidad,precio_unitario,iva_tasa,subtotal,cuenta_contable_id,centro_costo_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (cidc,concepto_id,item_id,deposito_id,item.get("descripcion",""),cantidad_item,precio_item,iva_tasa,subtotal_item,cuenta_detalle,centro_detalle))
-                if (concepto_id not in (None,"","null") or item_id) and d.get("estado","registrado") not in ("borrador","anulado"):
+                if (concepto_id not in (None,"","null") or item_id) and d.get("estado","") == "contabilizado":
                     registrar_ingreso_compra(conn,cid,int(cidc),{
                         "concepto_id":concepto_id,"item_id":item_id,"deposito_id":deposito_id,
                         "cantidad":cantidad_item,"precio_unitario":precio_item
