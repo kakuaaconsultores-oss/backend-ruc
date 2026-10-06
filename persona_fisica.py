@@ -99,7 +99,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         _init(conn)
         conn.commit()
 
-    # PostgreSQL y SQLite comparten la misma API; las tablas se crean al primer uso del módulo.\n    @app.get("/api/persona-fisica/resumen")
+    # Responder explícitamente al preflight CORS del módulo PF.\n    # Flask-CORS también agrega los headers, pero esta ruta evita que un OPTIONS\n    # llegue a un 404 cuando el navegador envía X-Cliente-ID/CSRF u otros headers.\n    @app.route("/api/persona-fisica/<path:_ruta>", methods=["OPTIONS"])\n    def pf_preflight(_ruta):\n        return ("", 204)\n\n    # PostgreSQL y SQLite comparten la misma API; las tablas se crean al primer uso del módulo.\n    @app.get("/api/persona-fisica/resumen")
     @admin_required
     def pf_resumen():
         cid, error = _cliente_pf()
