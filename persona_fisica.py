@@ -1,3 +1,5 @@
+from flask import jsonify, request
+
 # Módulo de operaciones simplificadas para contribuyentes Persona Física.
 #
 # Mantiene separado el circuito PF del ERP empresarial:
@@ -26,6 +28,34 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         return cliente_id, None
 
     def _init(conn):
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_personas(
+            id {idc},
+            cliente_id INTEGER NOT NULL,
+            tipo_persona TEXT NOT NULL DEFAULT 'FISICA',
+            nombre TEXT NOT NULL,
+            ruc TEXT DEFAULT '',
+            documento TEXT DEFAULT '',
+            telefono TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            direccion TEXT DEFAULT '',
+            observacion TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+            actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_dependientes(
+            id {idc},
+            cliente_id INTEGER NOT NULL,
+            nombre TEXT NOT NULL,
+            parentesco TEXT NOT NULL,
+            documento TEXT DEFAULT '',
+            fecha_nacimiento TEXT DEFAULT '',
+            ruc TEXT DEFAULT '',
+            observacion TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+            actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_medios_pago(
             id {idc},
             cliente_id INTEGER NOT NULL,
@@ -273,3 +303,204 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
                 FROM pf_operaciones WHERE cliente_id=? GROUP BY tipo,estado ORDER BY tipo,estado""",(cid,)).fetchall()
             return jsonify([dict(r) for r in filas])
         finally:conn.close()
+
+    # Catastro: personas y dependientes, aislados por cliente activo.
+    @app.get("/api/persona-fisica/personas")
+    @admin_required
+    def pf_personas_list():
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            rows = conn.execute(
+                "SELECT * FROM pf_personas WHERE cliente_id=? AND activo=1 ORDER BY nombre",
+                (cid,),
+            ).fetchall()
+            return jsonify([dict(r) for r in rows])
+        finally:
+            conn.close()
+
+    @app.post("/api/persona-fisica/personas")
+    @admin_required
+    def pf_personas_create():
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        d = request.get_json(silent=True) or {}
+        nombre = str(d.get("nombre") or "").strip()
+        tipo = str(d.get("tipo_persona") or "FISICA").upper().strip()
+        if not nombre or tipo not in ("FISICA", "JURIDICA"):
+            return jsonify({"error": "Nombre y tipo de persona válidos son obligatorios."}), 400
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            cur = conn.execute(
+                """INSERT INTO pf_personas
+                (cliente_id,tipo_persona,nombre,ruc,documento,telefono,email,direccion,observacion)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (cid, tipo, nombre, str(d.get("ruc") or "").strip(),
+                 str(d.get("documento") or "").strip(), str(d.get("telefono") or "").strip(),
+                 str(d.get("email") or "").strip(), str(d.get("direccion") or "").strip(),
+                 str(d.get("observacion") or "").strip()),
+            )
+            row = conn.execute(
+                "SELECT id FROM pf_personas WHERE cliente_id=? ORDER BY id DESC LIMIT 1", (cid,)
+            ).fetchone()
+            conn.commit()
+            return jsonify({"ok": True, "id": row["id"] if row else None}), 201
+        except Exception:
+            conn.rollback()
+            return jsonify({"error": "No se pudo guardar la persona. Verificá los datos e intentá nuevamente."}), 400
+        finally:
+            conn.close()
+
+    @app.put("/api/persona-fisica/personas/<int:persona_id>")
+    @admin_required
+    def pf_personas_update(persona_id):
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        d = request.get_json(silent=True) or {}
+        nombre = str(d.get("nombre") or "").strip()
+        tipo = str(d.get("tipo_persona") or "FISICA").upper().strip()
+        if not nombre or tipo not in ("FISICA", "JURIDICA"):
+            return jsonify({"error": "Nombre y tipo de persona válidos son obligatorios."}), 400
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            cur = conn.execute(
+                """UPDATE pf_personas SET tipo_persona=?,nombre=?,ruc=?,documento=?,telefono=?,
+                email=?,direccion=?,observacion=?,actualizado_en=CURRENT_TIMESTAMP
+                WHERE id=? AND cliente_id=? AND activo=1""",
+                (tipo, nombre, str(d.get("ruc") or "").strip(), str(d.get("documento") or "").strip(),
+                 str(d.get("telefono") or "").strip(), str(d.get("email") or "").strip(),
+                 str(d.get("direccion") or "").strip(), str(d.get("observacion") or "").strip(),
+                 persona_id, cid),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return jsonify({"error": "Persona no encontrada."}), 404
+            return jsonify({"ok": True})
+        finally:
+            conn.close()
+
+    @app.delete("/api/persona-fisica/personas/<int:persona_id>")
+    @admin_required
+    def pf_personas_delete(persona_id):
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            cur = conn.execute(
+                "UPDATE pf_personas SET activo=0,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",
+                (persona_id, cid),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return jsonify({"error": "Persona no encontrada."}), 404
+            return jsonify({"ok": True})
+        finally:
+            conn.close()
+
+    @app.get("/api/persona-fisica/dependientes")
+    @admin_required
+    def pf_dependientes_list():
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            rows = conn.execute(
+                "SELECT * FROM pf_dependientes WHERE cliente_id=? AND activo=1 ORDER BY nombre",
+                (cid,),
+            ).fetchall()
+            return jsonify([dict(r) for r in rows])
+        finally:
+            conn.close()
+
+    @app.post("/api/persona-fisica/dependientes")
+    @admin_required
+    def pf_dependientes_create():
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        d = request.get_json(silent=True) or {}
+        nombre = str(d.get("nombre") or "").strip()
+        parentesco = str(d.get("parentesco") or "").strip()
+        if not nombre or parentesco not in ("HIJO/A", "CONYUGE", "PADRE/MADRE", "OTRO"):
+            return jsonify({"error": "Nombre y parentesco válido son obligatorios."}), 400
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            conn.execute(
+                """INSERT INTO pf_dependientes
+                (cliente_id,nombre,parentesco,documento,fecha_nacimiento,ruc,observacion)
+                VALUES(?,?,?,?,?,?,?)""",
+                (cid, nombre, parentesco, str(d.get("documento") or "").strip(),
+                 str(d.get("fecha_nacimiento") or "").strip(), str(d.get("ruc") or "").strip(),
+                 str(d.get("observacion") or "").strip()),
+            )
+            row = conn.execute(
+                "SELECT id FROM pf_dependientes WHERE cliente_id=? ORDER BY id DESC LIMIT 1", (cid,)
+            ).fetchone()
+            conn.commit()
+            return jsonify({"ok": True, "id": row["id"] if row else None}), 201
+        except Exception:
+            conn.rollback()
+            return jsonify({"error": "No se pudo guardar el dependiente. Verificá los datos e intentá nuevamente."}), 400
+        finally:
+            conn.close()
+
+    @app.put("/api/persona-fisica/dependientes/<int:dependiente_id>")
+    @admin_required
+    def pf_dependientes_update(dependiente_id):
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        d = request.get_json(silent=True) or {}
+        nombre = str(d.get("nombre") or "").strip()
+        parentesco = str(d.get("parentesco") or "").strip()
+        if not nombre or parentesco not in ("HIJO/A", "CONYUGE", "PADRE/MADRE", "OTRO"):
+            return jsonify({"error": "Nombre y parentesco válido son obligatorios."}), 400
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            cur = conn.execute(
+                """UPDATE pf_dependientes SET nombre=?,parentesco=?,documento=?,fecha_nacimiento=?,
+                ruc=?,observacion=?,actualizado_en=CURRENT_TIMESTAMP
+                WHERE id=? AND cliente_id=? AND activo=1""",
+                (nombre, parentesco, str(d.get("documento") or "").strip(),
+                 str(d.get("fecha_nacimiento") or "").strip(), str(d.get("ruc") or "").strip(),
+                 str(d.get("observacion") or "").strip(), dependiente_id, cid),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return jsonify({"error": "Dependiente no encontrado."}), 404
+            return jsonify({"ok": True})
+        finally:
+            conn.close()
+
+    @app.delete("/api/persona-fisica/dependientes/<int:dependiente_id>")
+    @admin_required
+    def pf_dependientes_delete(dependiente_id):
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        conn = get_db()
+        try:
+            _ensure(conn, cid)
+            cur = conn.execute(
+                "UPDATE pf_dependientes SET activo=0,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",
+                (dependiente_id, cid),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return jsonify({"error": "Dependiente no encontrado."}), 404
+            return jsonify({"ok": True})
+        finally:
+            conn.close()
