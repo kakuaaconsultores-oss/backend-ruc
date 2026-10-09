@@ -628,3 +628,70 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             if not cur.rowcount:return jsonify({"error":"Talonario no encontrado."}),404
             return jsonify({"ok":True})
         finally:conn.close()
+
+
+    # Periodos fiscales compartidos por los módulos del ERP.
+    def _ensure_periodos(conn):
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS erp_periodos_fiscales(
+            id {idc},
+            cliente_id INTEGER NOT NULL,
+            anio INTEGER NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'ABIERTO',
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(cliente_id, anio)
+        )""")
+
+    def _asegurar_periodo(conn, cliente_id, anio):
+        conn.execute(
+            "INSERT INTO erp_periodos_fiscales(cliente_id, anio) VALUES(?, ?) ON CONFLICT(cliente_id, anio) DO NOTHING",
+            (cliente_id, anio),
+        )
+
+    @app.get("/api/periodos-fiscales")
+    def erp_listar_periodos_fiscales():
+        cliente_id, error = obtener_cliente_contable()
+        if error:
+            return error
+        anio_actual = datetime.now().year
+        conn = get_db()
+        try:
+            _ensure_periodos(conn)
+            # Creación idempotente: el primer acceso del año crea su periodo automáticamente.
+            _asegurar_periodo(conn, cliente_id, anio_actual)
+            conn.commit()
+            filas = conn.execute(
+                "SELECT id, anio, estado FROM erp_periodos_fiscales WHERE cliente_id=? ORDER BY anio DESC",
+                (cliente_id,),
+            ).fetchall()
+            return jsonify({
+                "periodo_actual": anio_actual,
+                "periodos": [dict(f) for f in filas],
+            })
+        finally:
+            conn.close()
+
+    @app.post("/api/periodos-fiscales")
+    @admin_required
+    def erp_crear_periodo_fiscal():
+        cliente_id, error = obtener_cliente_contable()
+        if error:
+            return error
+        datos = request.get_json(silent=True) or {}
+        try:
+            anio = int(datos.get("anio"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Indicá un año válido."}), 400
+        if anio < 2000 or anio > 2100:
+            return jsonify({"error": "El año debe estar entre 2000 y 2100."}), 400
+        conn = get_db()
+        try:
+            _ensure_periodos(conn)
+            _asegurar_periodo(conn, cliente_id, anio)
+            conn.commit()
+            fila = conn.execute(
+                "SELECT id, anio, estado FROM erp_periodos_fiscales WHERE cliente_id=? AND anio=?",
+                (cliente_id, anio),
+            ).fetchone()
+            return jsonify({"ok": True, "periodo": dict(fila)}), 201
+        finally:
+            conn.close()
