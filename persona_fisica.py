@@ -33,7 +33,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             return None, ({"error": "Este módulo está disponible únicamente para Persona Física."}, 409)
         return cliente_id, None
 
-    def _init(conn):
+    def _init(conn, cliente_id):
         conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_personas(
             id {idc},
             cliente_id INTEGER NOT NULL,
@@ -145,7 +145,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         )
 
     def _ensure(conn, cliente_id):
-        _init(conn)
+        _init(conn, cliente_id)
         conn.commit()
 
     @app.get("/api/persona-fisica/resumen")
