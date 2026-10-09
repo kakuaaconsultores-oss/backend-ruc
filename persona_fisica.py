@@ -755,60 +755,107 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         if error:
             return jsonify(error[0]), error[1]
         try:
-            mes = int(request.args.get("mes", date.today().month))
-            anio = int(request.args.get("anio", date.today().year))
+            mes_solicitado = int(request.args.get("mes", date.today().month))
+            anio_solicitado = int(request.args.get("anio", date.today().year))
         except (TypeError, ValueError):
             return jsonify({"error": "Seleccioná un mes y año válidos."}), 400
-        if mes < 1 or mes > 12 or anio < 2010 or anio > date.today().year + 1:
+        if mes_solicitado < 1 or mes_solicitado > 12 or anio_solicitado < 2010 or anio_solicitado > date.today().year + 1:
             return jsonify({"error": "El mes o año seleccionado no es válido."}), 400
 
-        cache_key = (anio, mes)
-        now = datetime.now(ZoneInfo("America/Asuncion")).timestamp()
+        meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+                 "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+        ahora = datetime.now(ZoneInfo("America/Asuncion"))
+        cache_key = (anio_solicitado, mes_solicitado)
+        now = ahora.timestamp()
         cached = _cotizaciones_cache.get(cache_key)
         if cached and now - cached["timestamp"] < 600 and request.args.get("actualizar") != "1":
             return jsonify({**cached["data"], "actualizado": False, "cache": True})
 
-        url = "https://www.dnit.gov.py/web/portal-institucional/cotizaciones"
-        try:
-            req = Request(url, headers={"User-Agent": "KAKUAA-ERP/1.0", "Accept": "text/html"})
-            with urlopen(req, timeout=20) as response:
-                html = response.read().decode("utf-8", errors="replace")
-        except (URLError, HTTPError, TimeoutError, OSError) as exc:
-            if cached:
-                return jsonify({**cached["data"], "actualizado": False, "cache": True, "aviso": "DNIT no respondió; se muestran los últimos datos obtenidos."})
-            return jsonify({"error": "No se pudo consultar la página de cotizaciones de la DNIT. Intentá nuevamente más tarde.", "detalle": str(exc)[:180]}), 502
+        # La DNIT publica una página por mes dentro de "Softwares y sistemas".
+        # Si el mes actual aún no fue publicado, se busca el mes anterior más reciente.
+        candidatos = [(mes_solicitado, anio_solicitado)]
+        if mes_solicitado == ahora.month and anio_solicitado == ahora.year:
+            m, a = mes_solicitado, anio_solicitado
+            for _ in range(3):
+                m -= 1
+                if m < 1:
+                    m = 12
+                    a -= 1
+                candidatos.append((m, a))
 
-        parser = _DNITCotizacionesParser()
-        parser.feed(html)
-        meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-        patron = f"tipos de cambios del mes de {meses[mes-1]} {anio}".casefold()
-        filas = []
-        for encabezado, celdas in parser.rows:
-            if encabezado.casefold() != patron or len(celdas) < 13:
-                continue
+        ultima_fuente = "https://www.dnit.gov.py/web/portal-institucional/softwares-y-sistemas"
+        for mes_real, anio_real in candidatos:
+            nombre_mes = meses[mes_real - 1]
+            url = (
+                "https://www.dnit.gov.py/web/portal-institucional/softwares-y-sistemas/"
+                "-/asset_publisher/aere/content/tipos-de-cambios-del-mes-de-"
+                f"{nombre_mes}-{anio_real}"
+            )
+            ultima_fuente = url
             try:
-                dia = int(celdas[0])
-            except (ValueError, TypeError):
+                req = Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; KAKUAA-ERP/1.0)",
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "es-PY,es;q=0.9,en;q=0.7",
+                })
+                with urlopen(req, timeout=20) as response:
+                    html = response.read().decode("utf-8", errors="replace")
+            except (URLError, HTTPError, TimeoutError, OSError):
                 continue
-            if dia < 1 or dia > 31:
+
+            parser = _DNITCotizacionesParser()
+            parser.feed(html)
+            patron = f"tipos de cambios del mes de {nombre_mes} {anio_real}".casefold()
+            filas = []
+            for encabezado, celdas in parser.rows:
+                # Validar encabezado para no confundir tablas de navegación con cotizaciones.
+                encabezado_normalizado = " ".join((encabezado or "").split()).casefold()
+                if encabezado_normalizado != patron or len(celdas) < 13:
+                    continue
+                try:
+                    dia = int(str(celdas[0]).strip())
+                except (ValueError, TypeError):
+                    continue
+                if dia < 1 or dia > 31:
+                    continue
+                valores = celdas[1:13]
+                monedas = ["dolar", "real", "peso_argentino", "yen", "euro", "libra"]
+                fila = {"fecha": f"{anio_real:04d}-{mes_real:02d}-{dia:02d}", "dia": dia}
+                for i, moneda in enumerate(monedas):
+                    fila[moneda + "_compra"] = valores[i * 2]
+                    fila[moneda + "_venta"] = valores[i * 2 + 1]
+                filas.append(fila)
+
+            if not filas:
                 continue
-            valores = celdas[1:13]
-            monedas = ["dolar", "real", "peso_argentino", "yen", "euro", "libra"]
-            fila = {"fecha": f"{anio:04d}-{mes:02d}-{dia:02d}", "dia": dia}
-            for i, moneda in enumerate(monedas):
-                fila[moneda + "_compra"] = valores[i * 2]
-                fila[moneda + "_venta"] = valores[i * 2 + 1]
-            filas.append(fila)
 
-        if not filas:
-            return jsonify({"error": f"La DNIT no publicó datos reconocibles para {meses[mes-1]} de {anio}.", "fuente": url}), 404
+            filas.sort(key=lambda r: r["dia"])
+            data = {
+                "mes": mes_real,
+                "anio": anio_real,
+                "nombre_mes": nombre_mes.capitalize(),
+                "cotizaciones": filas,
+                "cantidad": len(filas),
+                "fuente": url,
+                "consultado_en": datetime.now(ZoneInfo("America/Asuncion")).isoformat(timespec="seconds"),
+                "actualizado": True,
+                "cache": False,
+            }
+            if (mes_real, anio_real) != (mes_solicitado, anio_solicitado):
+                data["aviso"] = (
+                    f"La DNIT aún no publicó las cotizaciones de "
+                    f"{meses[mes_solicitado - 1].capitalize()} de {anio_solicitado}; "
+                    f"se muestran las últimas disponibles: {nombre_mes.capitalize()} de {anio_real}."
+                )
+            _cotizaciones_cache[(anio_real, mes_real)] = {"timestamp": now, "data": data}
+            _cotizaciones_cache[cache_key] = {"timestamp": now, "data": data}
+            return jsonify(data)
 
-        filas.sort(key=lambda r: r["dia"])
-        data = {
-            "mes": mes, "anio": anio, "nombre_mes": meses[mes-1].capitalize(),
-            "cotizaciones": filas, "cantidad": len(filas), "fuente": url,
-            "consultado_en": datetime.now(ZoneInfo("America/Asuncion")).isoformat(timespec="seconds"),
-            "actualizado": True, "cache": False
-        }
-        _cotizaciones_cache[cache_key] = {"timestamp": now, "data": data}
-        return jsonify(data)
+        return jsonify({
+            "error": (
+                f"No se encontraron cotizaciones publicadas por la DNIT para "
+                f"{meses[mes_solicitado - 1].capitalize()} de {anio_solicitado}. "
+                "Probá otro mes o usá Actualizar para volver a consultar."
+            ),
+            "fuente": ultima_fuente,
+        }), 404
