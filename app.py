@@ -192,6 +192,13 @@ CORS_ORIGINS.extend(
 )
 CORS(app, resources={r"/api/.*": {"origins": CORS_ORIGINS}}, supports_credentials=True, allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Cliente-ID", "X-Periodo-Fiscal"], expose_headers=["Content-Disposition"])
 
+# Resolver el preflight antes de autenticación y despacho de rutas.
+# Se usa before_request (no una ruta comodín) para no convertir los 404 en 405.
+@app.before_request
+def _responder_preflight():
+    if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        return ("", 204)
+
 # Refuerzo de CORS para respuestas de error (404/500) y preflight OPTIONS.
 @app.after_request
 def _reforzar_cors(response):
