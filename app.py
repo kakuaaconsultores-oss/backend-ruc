@@ -190,7 +190,7 @@ CORS_ORIGINS.extend(
     o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",")
     if o.strip() and o.strip() not in CORS_ORIGINS
 )
-CORS(app, resources={r"/api/.*": {"origins": CORS_ORIGINS}}, supports_credentials=True, allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Cliente-ID"], expose_headers=["Content-Disposition"])
+CORS(app, resources={r"/api/.*": {"origins": CORS_ORIGINS}}, supports_credentials=True, allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Cliente-ID", "X-Periodo-Fiscal"], expose_headers=["Content-Disposition"])
 
 # Refuerzo de CORS para respuestas de error (404/500) y preflight OPTIONS.
 @app.after_request
@@ -199,7 +199,7 @@ def _reforzar_cors(response):
     if origin and origin in CORS_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-CSRF-Token, X-Cliente-ID"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-CSRF-Token, X-Cliente-ID, X-Periodo-Fiscal"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         response.headers["Vary"] = "Origin"
     return response
