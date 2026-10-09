@@ -765,7 +765,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         cache_key = (anio, mes)
         now = datetime.now(ZoneInfo("America/Asuncion")).timestamp()
         cached = _cotizaciones_cache.get(cache_key)
-        if cached and now - cached["timestamp"] < 600:
+        if cached and now - cached["timestamp"] < 600 and request.args.get("actualizar") != "1":
             return jsonify({**cached["data"], "actualizado": False, "cache": True})
 
         url = "https://www.dnit.gov.py/web/portal-institucional/cotizaciones"
