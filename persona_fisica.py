@@ -1,3 +1,4 @@
+from datetime import datetime
 from flask import jsonify, request
 
 # Módulo de operaciones simplificadas para contribuyentes Persona Física.
