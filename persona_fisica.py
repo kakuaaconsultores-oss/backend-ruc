@@ -165,7 +165,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
                 FROM pf_operaciones WHERE cliente_id=?""",(cid,)).fetchone()
             vencidos = conn.execute("""SELECT COUNT(*) cantidad FROM pf_operaciones
                 WHERE cliente_id=? AND estado IN ('PENDIENTE','PARCIAL')
-                AND fecha_vencimiento IS NOT NULL AND fecha_vencimiento < CURRENT_DATE""",(cid,)).fetchone()
+                AND fecha_vencimiento IS NOT NULL AND fecha_vencimiento < CAST(CURRENT_DATE AS TEXT)""",(cid,)).fetchone()
             return jsonify({
                 "ingresos": float(total["ingresos"] or 0),
                 "egresos": float(total["egresos"] or 0),
