@@ -148,11 +148,6 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         _init(conn)
         conn.commit()
 
-    # Responder explícitamente al preflight CORS para que OPTIONS no sea rechazado.
-    @app.route("/api/<path:_ruta>", methods=["OPTIONS"])
-    def api_preflight(_ruta):
-        return ("", 204)
-
     @app.get("/api/persona-fisica/resumen")
     @admin_required
     def pf_resumen():
