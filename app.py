@@ -199,7 +199,10 @@ def _reforzar_cors(response):
     if origin and origin in CORS_ORIGINS:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-CSRF-Token, X-Cliente-ID, X-Periodo-Fiscal"
+        # Reflejar los encabezados solicitados por el navegador en el preflight.
+        # Evita que un nuevo encabezado del frontend bloquee toda la API por CORS.
+        requested_headers = request.headers.get("Access-Control-Request-Headers", "").strip()
+        response.headers["Access-Control-Allow-Headers"] = requested_headers or "Content-Type, Authorization, X-CSRF-Token, X-Cliente-ID, X-Periodo-Fiscal"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         response.headers["Vary"] = "Origin"
     return response
