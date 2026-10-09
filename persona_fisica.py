@@ -21,7 +21,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         conn = get_db()
         try:
             row = conn.execute(
-                "SELECT id, tipo_persona, impuestos FROM clientes WHERE id=?",
+                "SELECT id, tipo_persona FROM clientes WHERE id=?",
                 (cliente_id,),
             ).fetchone()
         finally:
