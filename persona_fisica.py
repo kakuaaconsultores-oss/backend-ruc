@@ -56,6 +56,19 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             creado_en TEXT DEFAULT CURRENT_TIMESTAMP,
             actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_timbrados(
+            id {idc}, cliente_id INTEGER NOT NULL, numero TEXT NOT NULL,
+            establecimiento TEXT NOT NULL DEFAULT '001', punto_expedicion TEXT NOT NULL DEFAULT '001',
+            vigencia_desde TEXT DEFAULT '', vigencia_hasta TEXT DEFAULT '', fecha_vencimiento TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'VIGENTE', observacion TEXT DEFAULT '', activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_talonarios(
+            id {idc}, cliente_id INTEGER NOT NULL, serie TEXT NOT NULL, tipo TEXT NOT NULL DEFAULT 'RECIBO',
+            numero_desde TEXT NOT NULL, numero_hasta TEXT NOT NULL, proximo_numero TEXT NOT NULL,
+            fecha_vencimiento TEXT DEFAULT '', estado TEXT NOT NULL DEFAULT 'ACTIVO', observacion TEXT DEFAULT '',
+            activo INTEGER NOT NULL DEFAULT 1, creado_en TEXT DEFAULT CURRENT_TIMESTAMP, actualizado_en TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         conn.execute(f"""CREATE TABLE IF NOT EXISTS pf_medios_pago(
             id {idc},
             cliente_id INTEGER NOT NULL,
@@ -504,3 +517,114 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             return jsonify({"ok": True})
         finally:
             conn.close()
+
+    @app.get("/api/persona-fisica/timbrados")
+    @admin_required
+    def pf_timbrados_list():
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        conn=get_db()
+        try:
+            _ensure(conn,cid)
+            return jsonify([dict(r) for r in conn.execute("SELECT * FROM pf_timbrados WHERE cliente_id=? AND activo=1 ORDER BY id DESC",(cid,)).fetchall()])
+        finally:conn.close()
+
+    @app.post("/api/persona-fisica/timbrados")
+    @admin_required
+    def pf_timbrados_create():
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        d=request.get_json(silent=True) or {}
+        vals=[str(d.get(k) or "").strip() for k in ("numero","establecimiento","punto_expedicion")]
+        estado=str(d.get("estado") or "VIGENTE").strip().upper()
+        if not all(vals) or estado not in ("VIGENTE","VENCIDO","ANULADO"):return jsonify({"error":"Número, establecimiento, punto de expedición y estado válido son obligatorios."}),400
+        conn=get_db()
+        try:
+            _ensure(conn,cid)
+            conn.execute("INSERT INTO pf_timbrados(cliente_id,numero,establecimiento,punto_expedicion,vigencia_desde,vigencia_hasta,fecha_vencimiento,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?)",(cid,*vals,str(d.get("vigencia_desde") or ""),str(d.get("vigencia_hasta") or ""),str(d.get("fecha_vencimiento") or ""),estado,str(d.get("observacion") or "").strip()))
+            row=conn.execute("SELECT id FROM pf_timbrados WHERE cliente_id=? ORDER BY id DESC LIMIT 1",(cid,)).fetchone();conn.commit()
+            return jsonify({"ok":True,"id":row["id"] if row else None}),201
+        except Exception:
+            conn.rollback();return jsonify({"error":"No se pudo guardar el timbrado; verificá los datos."}),400
+        finally:conn.close()
+
+    @app.put("/api/persona-fisica/timbrados/<int:rid>")
+    @admin_required
+    def pf_timbrados_update(rid):
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        d=request.get_json(silent=True) or {};vals=[str(d.get(k) or "").strip() for k in ("numero","establecimiento","punto_expedicion")]
+        estado=str(d.get("estado") or "VIGENTE").strip().upper()
+        if not all(vals) or estado not in ("VIGENTE","VENCIDO","ANULADO"):return jsonify({"error":"Datos obligatorios o estado inválido."}),400
+        conn=get_db()
+        try:
+            _ensure(conn,cid);cur=conn.execute("UPDATE pf_timbrados SET numero=?,establecimiento=?,punto_expedicion=?,vigencia_desde=?,vigencia_hasta=?,fecha_vencimiento=?,estado=?,observacion=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",(*vals,str(d.get("vigencia_desde") or ""),str(d.get("vigencia_hasta") or ""),str(d.get("fecha_vencimiento") or ""),estado,str(d.get("observacion") or "").strip(),rid,cid));conn.commit()
+            if not cur.rowcount:return jsonify({"error":"Timbrado no encontrado."}),404
+            return jsonify({"ok":True})
+        finally:conn.close()
+
+    @app.delete("/api/persona-fisica/timbrados/<int:rid>")
+    @admin_required
+    def pf_timbrados_delete(rid):
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        conn=get_db()
+        try:
+            _ensure(conn,cid);cur=conn.execute("UPDATE pf_timbrados SET activo=0,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",(rid,cid));conn.commit()
+            if not cur.rowcount:return jsonify({"error":"Timbrado no encontrado."}),404
+            return jsonify({"ok":True})
+        finally:conn.close()
+
+    @app.get("/api/persona-fisica/talonarios")
+    @admin_required
+    def pf_talonarios_list():
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        conn=get_db()
+        try:
+            _ensure(conn,cid)
+            return jsonify([dict(r) for r in conn.execute("SELECT * FROM pf_talonarios WHERE cliente_id=? AND activo=1 ORDER BY serie,id",(cid,)).fetchall()])
+        finally:conn.close()
+
+    @app.post("/api/persona-fisica/talonarios")
+    @admin_required
+    def pf_talonarios_create():
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        d=request.get_json(silent=True) or {};serie=str(d.get("serie") or "").strip();tipo=str(d.get("tipo") or "RECIBO").strip().upper()
+        desde=str(d.get("numero_desde") or "").strip();hasta=str(d.get("numero_hasta") or "").strip();proximo=str(d.get("proximo_numero") or "").strip();estado=str(d.get("estado") or "ACTIVO").strip().upper()
+        if not all((serie,tipo,desde,hasta,proximo)) or estado not in ("ACTIVO","AGOTADO","VENCIDO","ANULADO"):return jsonify({"error":"Serie, rango, próximo número y estado válido son obligatorios."}),400
+        conn=get_db()
+        try:
+            _ensure(conn,cid);conn.execute("INSERT INTO pf_talonarios(cliente_id,serie,tipo,numero_desde,numero_hasta,proximo_numero,fecha_vencimiento,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?)",(cid,serie,tipo,desde,hasta,proximo,str(d.get("fecha_vencimiento") or ""),estado,str(d.get("observacion") or "").strip()))
+            row=conn.execute("SELECT id FROM pf_talonarios WHERE cliente_id=? ORDER BY id DESC LIMIT 1",(cid,)).fetchone();conn.commit()
+            return jsonify({"ok":True,"id":row["id"] if row else None}),201
+        except Exception:
+            conn.rollback();return jsonify({"error":"No se pudo guardar el talonario; verificá los datos."}),400
+        finally:conn.close()
+
+    @app.put("/api/persona-fisica/talonarios/<int:rid>")
+    @admin_required
+    def pf_talonarios_update(rid):
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        d=request.get_json(silent=True) or {};serie=str(d.get("serie") or "").strip();tipo=str(d.get("tipo") or "RECIBO").strip().upper();desde=str(d.get("numero_desde") or "").strip();hasta=str(d.get("numero_hasta") or "").strip();proximo=str(d.get("proximo_numero") or "").strip();estado=str(d.get("estado") or "ACTIVO").strip().upper()
+        if not all((serie,tipo,desde,hasta,proximo)) or estado not in ("ACTIVO","AGOTADO","VENCIDO","ANULADO"):return jsonify({"error":"Serie, rango, próximo número y estado válido son obligatorios."}),400
+        conn=get_db()
+        try:
+            _ensure(conn,cid);cur=conn.execute("UPDATE pf_talonarios SET serie=?,tipo=?,numero_desde=?,numero_hasta=?,proximo_numero=?,fecha_vencimiento=?,estado=?,observacion=?,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",(serie,tipo,desde,hasta,proximo,str(d.get("fecha_vencimiento") or ""),estado,str(d.get("observacion") or "").strip(),rid,cid));conn.commit()
+            if not cur.rowcount:return jsonify({"error":"Talonario no encontrado."}),404
+            return jsonify({"ok":True})
+        finally:conn.close()
+
+    @app.delete("/api/persona-fisica/talonarios/<int:rid>")
+    @admin_required
+    def pf_talonarios_delete(rid):
+        cid,error=_cliente_pf()
+        if error:return jsonify(error[0]),error[1]
+        conn=get_db()
+        try:
+            _ensure(conn,cid);cur=conn.execute("UPDATE pf_talonarios SET activo=0,actualizado_en=CURRENT_TIMESTAMP WHERE id=? AND cliente_id=? AND activo=1",(rid,cid));conn.commit()
+            if not cur.rowcount:return jsonify({"error":"Talonario no encontrado."}),404
+            return jsonify({"ok":True})
+        finally:conn.close()
