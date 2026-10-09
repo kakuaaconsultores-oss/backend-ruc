@@ -95,7 +95,21 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 UNIQUE(cliente_id,codigo))""")
             # Estas columnas ya forman parte del CREATE TABLE. Solo se agregan
             # cuando la base existente proviene de una versión anterior.
+            def _table_exists(table):
+                if os.environ.get("DATABASE_URL"):
+                    return bool(conn.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema=current_schema() AND table_name=?",
+                        (table,)
+                    ).fetchone())
+                return bool(conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,)
+                ).fetchone())
+
             def _column_exists(table, column):
+                if not _table_exists(table):
+                    return False
                 if os.environ.get("DATABASE_URL"):
                     return bool(conn.execute(
                         "SELECT 1 FROM information_schema.columns "
@@ -113,7 +127,9 @@ def register(app, get_db, staff_required, usuario_required, insertar_id):
                 ("conceptos_compra", "stock_minimo", "REAL NOT NULL DEFAULT 0"),
                 ("conceptos_compra", "concepto_presupuestario", "TEXT DEFAULT NULL"),
             ):
-                if not _column_exists(table, column):
+                # conceptos_compra se crea unas líneas más abajo. No intentar
+                # migrarla antes de que exista; el CREATE TABLE incluye estas columnas.
+                if _table_exists(table) and not _column_exists(table, column):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             conn.execute(f"""CREATE TABLE IF NOT EXISTS proveedores (
                 id {id_col} PRIMARY KEY, cliente_id INTEGER NOT NULL, ruc TEXT DEFAULT '',
