@@ -1,5 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from html.parser import HTMLParser
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from datetime import date
 from flask import jsonify, request
 
 # Módulo de operaciones simplificadas para contribuyentes Persona Física.
@@ -697,3 +701,114 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
             return jsonify({"ok": True, "periodo": dict(fila)}), 201
         finally:
             conn.close()
+
+
+    # Cotizaciones oficiales de monedas publicadas por la DNIT.
+    _cotizaciones_cache = {}
+
+    class _DNITCotizacionesParser(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.heading = ""
+            self.heading_buffer = None
+            self.in_h4 = False
+            self.in_cell = False
+            self.cell_buffer = ""
+            self.row = None
+            self.rows = []
+
+        def handle_starttag(self, tag, attrs):
+            tag = tag.lower()
+            if tag == "h4":
+                self.in_h4 = True
+                self.heading_buffer = ""
+            elif tag == "tr":
+                self.row = []
+            elif tag in ("td", "th") and self.row is not None:
+                self.in_cell = True
+                self.cell_buffer = ""
+
+        def handle_data(self, data):
+            if self.in_h4 and self.heading_buffer is not None:
+                self.heading_buffer += data
+            if self.in_cell:
+                self.cell_buffer += data
+
+        def handle_endtag(self, tag):
+            tag = tag.lower()
+            if tag == "h4":
+                self.in_h4 = False
+                self.heading = " ".join((self.heading_buffer or "").split())
+                self.heading_buffer = None
+            elif tag in ("td", "th") and self.in_cell and self.row is not None:
+                self.row.append(" ".join(self.cell_buffer.split()))
+                self.in_cell = False
+                self.cell_buffer = ""
+            elif tag == "tr" and self.row is not None:
+                self.rows.append((self.heading, self.row))
+                self.row = None
+
+    @app.get("/api/persona-fisica/cotizaciones")
+    @admin_required
+    def pf_cotizaciones_dnit():
+        cid, error = _cliente_pf()
+        if error:
+            return jsonify(error[0]), error[1]
+        try:
+            mes = int(request.args.get("mes", date.today().month))
+            anio = int(request.args.get("anio", date.today().year))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Seleccioná un mes y año válidos."}), 400
+        if mes < 1 or mes > 12 or anio < 2010 or anio > date.today().year + 1:
+            return jsonify({"error": "El mes o año seleccionado no es válido."}), 400
+
+        cache_key = (anio, mes)
+        now = datetime.now(ZoneInfo("America/Asuncion")).timestamp()
+        cached = _cotizaciones_cache.get(cache_key)
+        if cached and now - cached["timestamp"] < 600:
+            return jsonify({**cached["data"], "actualizado": False, "cache": True})
+
+        url = "https://www.dnit.gov.py/web/portal-institucional/cotizaciones"
+        try:
+            req = Request(url, headers={"User-Agent": "KAKUAA-ERP/1.0", "Accept": "text/html"})
+            with urlopen(req, timeout=20) as response:
+                html = response.read().decode("utf-8", errors="replace")
+        except (URLError, HTTPError, TimeoutError, OSError) as exc:
+            if cached:
+                return jsonify({**cached["data"], "actualizado": False, "cache": True, "aviso": "DNIT no respondió; se muestran los últimos datos obtenidos."})
+            return jsonify({"error": "No se pudo consultar la página de cotizaciones de la DNIT. Intentá nuevamente más tarde.", "detalle": str(exc)[:180]}), 502
+
+        parser = _DNITCotizacionesParser()
+        parser.feed(html)
+        meses = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+        patron = f"tipos de cambios del mes de {meses[mes-1]} {anio}".casefold()
+        filas = []
+        for encabezado, celdas in parser.rows:
+            if encabezado.casefold() != patron or len(celdas) < 13:
+                continue
+            try:
+                dia = int(celdas[0])
+            except (ValueError, TypeError):
+                continue
+            if dia < 1 or dia > 31:
+                continue
+            valores = celdas[1:13]
+            monedas = ["dolar", "real", "peso_argentino", "yen", "euro", "libra"]
+            fila = {"fecha": f"{anio:04d}-{mes:02d}-{dia:02d}", "dia": dia}
+            for i, moneda in enumerate(monedas):
+                fila[moneda + "_compra"] = valores[i * 2]
+                fila[moneda + "_venta"] = valores[i * 2 + 1]
+            filas.append(fila)
+
+        if not filas:
+            return jsonify({"error": f"La DNIT no publicó datos reconocibles para {meses[mes-1]} de {anio}.", "fuente": url}), 404
+
+        filas.sort(key=lambda r: r["dia"])
+        data = {
+            "mes": mes, "anio": anio, "nombre_mes": meses[mes-1].capitalize(),
+            "cotizaciones": filas, "cantidad": len(filas), "fuente": url,
+            "consultado_en": datetime.now(ZoneInfo("America/Asuncion")).isoformat(timespec="seconds"),
+            "actualizado": True, "cache": False
+        }
+        _cotizaciones_cache[cache_key] = {"timestamp": now, "data": data}
+        return jsonify(data)
