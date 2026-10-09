@@ -1,4 +1,5 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import jsonify, request
 
 # Módulo de operaciones simplificadas para contribuyentes Persona Física.
@@ -653,7 +654,7 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         cliente_id, error = obtener_cliente_contable()
         if error:
             return error
-        anio_actual = datetime.now().year
+        anio_actual = datetime.now(ZoneInfo('America/Asuncion')).year
         conn = get_db()
         try:
             _ensure_periodos(conn)
