@@ -786,10 +786,19 @@ def registrar_modulo_persona_fisica(app, get_db, obtener_cliente_contable, admin
         ultima_fuente = "https://www.dnit.gov.py/web/portal-institucional/softwares-y-sistemas"
         for mes_real, anio_real in candidatos:
             nombre_mes = meses[mes_real - 1]
+            # DNIT publica cada mes con un slug que, actualmente, corresponde
+            # al mes anterior aunque el título y las cotizaciones sean del mes solicitado.
+            # Ej.: el contenido de octubre 2026 aparece bajo el slug septiembre-2026.
+            mes_slug = mes_real - 1
+            anio_slug = anio_real
+            if mes_slug < 1:
+                mes_slug = 12
+                anio_slug -= 1
+            nombre_mes_slug = meses[mes_slug - 1]
             url = (
                 "https://www.dnit.gov.py/web/portal-institucional/softwares-y-sistemas/"
                 "-/asset_publisher/aere/content/tipos-de-cambios-del-mes-de-"
-                f"{nombre_mes}-{anio_real}"
+                f"{nombre_mes_slug}-{anio_slug}"
             )
             ultima_fuente = url
             try:
